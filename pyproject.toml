@@ -1,0 +1,12 @@
+[project]
+name = "regex-click-python"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pyautogui>=0.9.54",
+    "pygetwindow>=0.0.9",
+    "pynput>=1.7.7",
+    "pywin32>=308",
+]
