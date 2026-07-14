@@ -15,7 +15,7 @@ if platform.system() == "Windows":
 
 POLL_MS    = 50
 LOG_MAX    = 30_000
-LOG_TRIM   = 1_000
+LOG_HEADROOM = 1_000  # rewrite is triggered once count reaches LOG_MAX + LOG_HEADROOM
 LOG_PATH    = Path(__file__).parent / "clip_log.txt"
 CONFIG_PATH = Path(__file__).parent / "config.json"
 VIEWER_LIMIT = 500
@@ -28,16 +28,20 @@ class ClipLog:
 
     def __init__(self, path: Path):
         self._path = path
-        self._count = sum(1 for _ in path.open(encoding="utf-8")) if path.exists() else 0
+        if path.exists():
+            with path.open(encoding="utf-8") as f:
+                self._count = sum(1 for _ in f)
+        else:
+            self._count = 0
 
     def write(self, text: str, action: str, reason: str) -> None:
         ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         safe = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
-        line = f"{ts} | {action:<9} | {reason:<15} | {safe}\n"
+        line = f"{ts} | {action:<11} | {reason:<15} | {safe}\n"
         with self._path.open("a", encoding="utf-8") as f:
             f.write(line)
         self._count += 1
-        if self._count > LOG_MAX + LOG_TRIM:
+        if self._count >= LOG_MAX + LOG_HEADROOM:
             self._trim()
 
     def _trim(self) -> None:
