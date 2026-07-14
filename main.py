@@ -1,6 +1,5 @@
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import Callable
 import re
 import pygetwindow as gw
 import pyautogui
@@ -10,37 +9,16 @@ from pynput import mouse
 if platform.system() == "Windows":
     import win32gui
 
-
-class ClipboardMonitor:
-    def __init__(self, root: tk.Tk, on_result: Callable[[str], None]):
-        self._root = root
-        self._on_result = on_result
-        self._pending = False
-
-    def schedule_capture(self) -> None:
-        if self._pending:
-            return
-        self._pending = True
-        self._root.after(1000, self._read)
-
-    def _read(self) -> None:
-        self._pending = False
-        try:
-            text = self._root.clipboard_get()
-        except tk.TclError:
-            text = ""
-        self._on_result(text)
+POLL_MS = 50  # clipboard re-evaluated this often; window state is always current before a click
 
 
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self._hwnd = None
+        self._hwnd: int | None = None
         self._is_active = False
         self._listener = None
         self._pattern: re.Pattern | None = None
-
-        self._monitor = ClipboardMonitor(root, self._on_clipboard)
 
         root.title("Regex Click Blocker")
         root.resizable(False, False)
@@ -119,11 +97,11 @@ class App:
 
         self._is_active = True
         self._toggle_btn.config(text="Stop")
-        self._status_var.set("Monitoring — click in target window to test")
+        self._status_var.set("Starting...")
         self._start_listener()
+        self.root.after(POLL_MS, self._tick)
 
     def _stop(self):
-        # Set flag before stopping listener so queued callbacks see it and bail.
         self._is_active = False
         self._stop_listener()
         if platform.system() == "Windows" and self._hwnd:
@@ -134,11 +112,15 @@ class App:
         self._status_var.set("Stopped")
 
     def _start_listener(self):
+        hwnd = self._hwnd
+
         def on_click(x, y, button, pressed):
-            if pressed:
-                # Dispatch to main thread — pyautogui must never run inside a
-                # low-level hook callback (causes OS message-pump deadlock).
-                self.root.after(0, self._copy_selection)
+            if not pressed or not self._is_active:
+                return
+            # Only refresh clipboard when the target window was enabled, meaning the
+            # click went through and likely changed the selection in the target window.
+            if platform.system() == "Windows" and hwnd and win32gui.IsWindowEnabled(hwnd):
+                self.root.after(0, lambda: pyautogui.hotkey("ctrl", "c"))
 
         self._listener = mouse.Listener(on_click=on_click)
         self._listener.start()
@@ -148,30 +130,29 @@ class App:
             self._listener.stop()
             self._listener = None
 
-    def _copy_selection(self):
-        # Guard against a queued after(0,...) firing after Stop was clicked.
+    def _tick(self):
         if not self._is_active:
             return
-        # SetForegroundWindow is intentionally absent: calling it on a
-        # disabled window flickered the enabled/disabled state on alternate
-        # clicks, letting every other click through.
-        pyautogui.hotkey("ctrl", "c")
-        self._monitor.schedule_capture()
 
-    def _on_clipboard(self, text: str):
+        try:
+            text = self.root.clipboard_get()
+        except tk.TclError:
+            text = ""
+
         self._clipboard_var.set(text)
-        if not self._is_active or self._hwnd is None or self._pattern is None:
-            return
 
-        matched = bool(self._pattern.search(text))
-        should_block = matched if not self._invert_var.get() else not matched
+        if self._hwnd is not None and self._pattern is not None:
+            matched = bool(self._pattern.search(text))
+            should_block = matched if not self._invert_var.get() else not matched
 
-        if platform.system() == "Windows":
-            win32gui.EnableWindow(self._hwnd, not should_block)
+            if platform.system() == "Windows":
+                win32gui.EnableWindow(self._hwnd, not should_block)
 
-        action = "BLOCKED" if should_block else "unblocked"
-        reason = "regex found" if matched else "regex not found"
-        self._status_var.set(f"{action} — {reason}")
+            action = "BLOCKED" if should_block else "unblocked"
+            reason = "regex found" if matched else "regex not found"
+            self._status_var.set(f"{action} — {reason}")
+
+        self.root.after(POLL_MS, self._tick)
 
 
 def main():
