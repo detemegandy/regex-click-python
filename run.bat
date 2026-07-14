@@ -23,7 +23,13 @@ if !errorlevel! neq 0 (
     )
 )
 
-:: ── 2. Ensure Python with tkinter ─────────────────────────────────────────────
+:: ── 2. Remove stale venv (lib64 symlink from non-Windows checkout causes access-denied) ──
+if exist .venv\lib64 (
+    echo Removing stale virtual environment...
+    rmdir /s /q .venv 2>nul
+)
+
+:: ── 3. Ensure Python with tkinter ─────────────────────────────────────────────
 uv run python -c "import tkinter" >nul 2>&1
 if !errorlevel! equ 0 goto :run
 
@@ -42,6 +48,6 @@ if !errorlevel! neq 0 (
     pause & exit /b 0
 )
 
-:: ── 3. Run ────────────────────────────────────────────────────────────────────
+:: ── 4. Run ────────────────────────────────────────────────────────────────────
 :run
 uv run main.py
