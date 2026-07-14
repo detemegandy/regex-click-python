@@ -24,7 +24,6 @@ Entry point: `main.py` → `App` class → `main()`.
 | File | Purpose |
 |---|---|
 | `main.py` | Entire app — `App` class + `main()` |
-| `hello.py` | Stub / placeholder, not wired into the app |
 | `pyproject.toml` | Project metadata and dependencies |
 | `uv.lock` | Locked dependency graph |
 | `.python-version` | Pins Python 3.14 for uv |
@@ -32,7 +31,6 @@ Entry point: `main.py` → `App` class → `main()`.
 ## Known issues
 
 - **Windows-only at runtime**: `window._hWnd` and `win32gui` are only valid on Windows. The platform guard is correct; `_hWnd` is only accessed inside `platform.system() == "Windows"` branches.
-- **`hello.py` is dead code** — not imported or called anywhere.
 
 ## Running
 
