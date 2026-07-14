@@ -34,23 +34,22 @@ Entry point: `main.py` → `App` class → `main()`.
 - **Windows-only at runtime**: `window._hWnd` and `win32gui` are only valid on Windows. The platform guard is correct; `_hWnd` is only accessed inside `platform.system() == "Windows"` branches.
 - **`hello.py` is dead code** — not imported or called anywhere.
 
-## Setup
+## Running
 
 ### Windows
 
-Python from python.org bundles tkinter. Just install deps and run:
+Double-click `run.bat` or run it from a terminal. It will:
+1. Check if tkinter is available
+2. If not, auto-install Python 3.14 from python.org via `winget` (includes tkinter)
+3. Launch the app
 
-```bash
-uv sync
-uv run main.py
-```
+`uv` must be installed first: https://docs.astral.sh/uv/
 
 ### macOS (dev only — app will not function fully)
 
-tkinter is not a pip package on macOS; install it via Homebrew before `uv sync`:
+tkinter is not a pip package on macOS; install it via Homebrew before `uv run`:
 
 ```bash
 brew install python-tk@3.14
-uv sync
 uv run main.py
 ```

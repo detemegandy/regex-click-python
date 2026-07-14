@@ -10,3 +10,6 @@ dependencies = [
     "pynput>=1.7.7",
     "pywin32>=308; sys_platform == 'win32'",
 ]
+
+[tool.uv]
+python-preference = "system"
