@@ -1,0 +1,56 @@
+# regex-click-python
+
+## What it does
+
+A tkinter desktop app (Windows-only at runtime) that lets you:
+1. Find a window by substring match on its title.
+2. Toggle mouse-click blocking on that window via `win32gui.EnableWindow`.
+3. On each click into that window, auto-copy the selection (`Ctrl+C`) and show the clipboard contents in the app.
+
+Entry point: `main.py` → `App` class → `main()`.
+
+## Stack
+
+- **Python 3.14** (`.python-version`)
+- **uv** for dependency management (`pyproject.toml` + `uv.lock`)
+- **tkinter** — UI
+- **pygetwindow** — window enumeration/lookup
+- **pynput** — global mouse listener (background thread)
+- **pyautogui** — sends `Ctrl+C` hotkey
+- **pywin32** (`win32gui`) — enables/disables windows (Windows only)
+
+## File map
+
+| File | Purpose |
+|---|---|
+| `main.py` | Entire app — `App` class + `main()` |
+| `hello.py` | Stub / placeholder, not wired into the app |
+| `pyproject.toml` | Project metadata and dependencies |
+| `uv.lock` | Locked dependency graph |
+| `.python-version` | Pins Python 3.14 for uv |
+
+## Known issues
+
+- **Windows-only at runtime**: `window._hWnd` and `win32gui` are only valid on Windows. The platform guard is correct; `_hWnd` is only accessed inside `platform.system() == "Windows"` branches.
+- **`hello.py` is dead code** — not imported or called anywhere.
+
+## Setup
+
+### Windows
+
+Python from python.org bundles tkinter. Just install deps and run:
+
+```bash
+uv sync
+uv run main.py
+```
+
+### macOS (dev only — app will not function fully)
+
+tkinter is not a pip package on macOS; install it via Homebrew before `uv sync`:
+
+```bash
+brew install python-tk@3.14
+uv sync
+uv run main.py
+```
