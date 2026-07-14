@@ -7,88 +7,149 @@ from pynput import mouse
 
 if platform.system() == "Windows":
     import win32gui
-    import win32con
+
+
+def find_windows(title_part: str) -> list[str]:
+    if not title_part:
+        return []
+    return [w for w in gw.getAllTitles() if title_part in w and w]
+
+
+class ClickBlocker:
+    """No-op base; used on non-Windows platforms."""
+    def block(self, hwnd: int) -> None:
+        pass
+
+    def unblock(self, hwnd: int) -> None:
+        pass
+
+
+class Win32ClickBlocker(ClickBlocker):
+    def block(self, hwnd: int) -> None:
+        win32gui.EnableWindow(hwnd, False)
+
+    def unblock(self, hwnd: int) -> None:
+        win32gui.EnableWindow(hwnd, True)
+
+
+class ClipboardMonitor:
+    def __init__(self, root: tk.Tk, on_result):
+        self._root = root
+        self._on_result = on_result
+        self._pending = False
+
+    def schedule_capture(self) -> None:
+        if self._pending:
+            return
+        self._pending = True
+        self._root.after(1000, self._read)
+
+    def _read(self) -> None:
+        self._pending = False
+        try:
+            text = self._root.clipboard_get()
+        except tk.TclError:
+            text = ""
+        self._on_result(text)
+
 
 class App:
-    def __init__(self, root):
+    def __init__(self, root: tk.Tk):
         self.root = root
-        self.is_blocking = False
-        self.listener = None
+        self._hwnd = None
+        self._is_blocking = False
+        self._listener = None
 
-        self.root.title("Cross-Platform UI")
+        self._blocker = Win32ClickBlocker() if platform.system() == "Windows" else ClickBlocker()
+        self._monitor = ClipboardMonitor(root, self._show_clipboard)
 
-        # Text box for entering window title part
-        self.entry_var = tk.StringVar()
-        self.entry = tk.Entry(root, textvariable=self.entry_var)
-        self.entry.pack(pady=10)
+        root.title("Cross-Platform UI")
 
-        self.toggle_button = tk.Button(root, text="Start", command=self.on_toggle_click)
-        self.toggle_button.pack(pady=10)
+        self._entry_var = tk.StringVar()
+        self._entry = tk.Entry(root, textvariable=self._entry_var)
+        self._entry.pack(pady=10)
 
-        # Read-only text box for displaying clipboard content
-        self.clipboard_content = tk.StringVar()
-        self.clipboard_display = tk.Entry(root, textvariable=self.clipboard_content, state='readonly', font=('italic', 10))
-        self.clipboard_display.pack(pady=10)
+        self._toggle_btn = tk.Button(root, text="Start", command=self._on_toggle)
+        self._toggle_btn.pack(pady=10)
 
-    def on_toggle_click(self):
-        title_part = self.entry_var.get()
-        matching_windows = [w for w in gw.getAllTitles() if title_part in w]
+        self._clipboard_var = tk.StringVar()
+        tk.Entry(root, textvariable=self._clipboard_var, state="readonly", font=("italic", 10)).pack(pady=10)
 
-        if len(matching_windows) == 1:
-            window = gw.getWindowsWithTitle(matching_windows[0])[0]
-            hwnd = window._hWnd
-            if not self.is_blocking:
-                if platform.system() == "Windows":
-                    win32gui.EnableWindow(hwnd, False)
-                    self.start_mouse_listener(hwnd)
-                self.toggle_button.config(text="Stop")
-                messagebox.showinfo("Selected Window", f"You selected: {matching_windows[0]}. Mouse clicks are now blocked.")
-            else:
-                if platform.system() == "Windows":
-                    win32gui.EnableWindow(hwnd, True)
-                    self.stop_mouse_listener()
-                self.toggle_button.config(text="Start")
-                messagebox.showinfo("Selected Window", f"Mouse clicks are now unblocked for: {matching_windows[0]}.")
-            self.is_blocking = not self.is_blocking
-            self.entry.config(fg="black")
+    def _on_toggle(self):
+        if self._is_blocking:
+            self._stop()
         else:
-            self.entry.config(fg="red")
-            if len(matching_windows) == 0:
+            self._start()
+
+    def _start(self):
+        titles = find_windows(self._entry_var.get())
+        if len(titles) != 1:
+            self._entry.config(fg="red")
+            if not titles:
                 messagebox.showinfo("Error", "No matching windows found.")
             else:
                 messagebox.showinfo("Error", "More than one matching window found.")
+            return
 
-    def start_mouse_listener(self, hwnd):
+        windows = gw.getWindowsWithTitle(titles[0])
+        if not windows:
+            messagebox.showinfo("Error", "Window closed before it could be selected.")
+            return
+
+        self._hwnd = windows[0]._hWnd if platform.system() == "Windows" else None
+        self._blocker.block(self._hwnd)
+        self._start_listener()
+        self._is_blocking = True
+        self._toggle_btn.config(text="Stop")
+        self._entry.config(fg="black")
+        messagebox.showinfo("Selected Window", f"You selected: {titles[0]}. Mouse clicks are now blocked.")
+
+    def _stop(self):
+        self._stop_listener()
+        self._blocker.unblock(self._hwnd)
+        hwnd = self._hwnd
+        self._hwnd = None
+        self._is_blocking = False
+        self._toggle_btn.config(text="Start")
+        messagebox.showinfo("Selected Window", "Mouse clicks are now unblocked.")
+
+    def _start_listener(self):
         def on_click(x, y, button, pressed):
             if pressed:
-                if platform.system() == "Windows":
-                    win32gui.SetForegroundWindow(hwnd)
-                    pyautogui.hotkey('ctrl', 'c')
-                    self.update_clipboard_content()
+                # Dispatch to main thread — pyautogui must never run inside a
+                # low-level hook callback (causes OS message-pump deadlock).
+                self.root.after(0, self._copy_selection)
 
-        self.listener = mouse.Listener(on_click=on_click)
-        self.listener.start()
+        self._listener = mouse.Listener(on_click=on_click)
+        self._listener.start()
 
-    def stop_mouse_listener(self):
-        if self.listener:
-            self.listener.stop()
-            self.listener = None
+    def _stop_listener(self):
+        if self._listener:
+            self._listener.stop()
+            self._listener = None
 
-    def update_clipboard_content(self):
-        self.root.after(1000, self.check_clipboard)
-
-    def check_clipboard(self):
-        clipboard_text = self.root.clipboard_get()
-        if clipboard_text:
-            self.clipboard_content.set(clipboard_text)
+    def _copy_selection(self):
+        # Guard against a queued after(0,...) firing after Stop was clicked.
+        if not self._is_blocking:
+            return
+        # SetForegroundWindow is intentionally absent: calling it on a
+        # disabled window flickered the enabled/disabled state on alternate
+        # clicks, letting every other click through.
+        if platform.system() == "Darwin":
+            pyautogui.hotkey("command", "c")
         else:
-            self.clipboard_content.set("null")
-            self.clipboard_display.config(font=('italic', 10))
+            pyautogui.hotkey("ctrl", "c")
+        self._monitor.schedule_capture()
+
+    def _show_clipboard(self, text: str):
+        self._clipboard_var.set(text if text else "null")
+
 
 def main():
     root = tk.Tk()
     app = App(root)
     root.mainloop()
+
 
 if __name__ == "__main__":
     main()

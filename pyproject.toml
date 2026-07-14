@@ -8,5 +8,5 @@ dependencies = [
     "pyautogui>=0.9.54",
     "pygetwindow>=0.0.9",
     "pynput>=1.7.7",
-    "pywin32>=308",
+    "pywin32>=308; sys_platform == 'win32'",
 ]
