@@ -11,3 +11,4 @@ wheels/
 
 # Runtime output
 clip_log.txt
+config.json
