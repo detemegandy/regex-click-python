@@ -4,12 +4,42 @@ import re
 import pygetwindow as gw
 import pyautogui
 import platform
+from datetime import datetime
+from pathlib import Path
 from pynput import mouse
 
 if platform.system() == "Windows":
     import win32gui
 
-POLL_MS = 50  # clipboard re-evaluated this often; window state is always current before a click
+POLL_MS = 50       # clipboard re-evaluated this often; window state is always current before a click
+LOG_MAX = 30_000   # rolling cap
+LOG_TRIM = 1_000   # trim this many extra lines before rewriting to amortise the cost
+LOG_PATH = Path(__file__).parent / "clip_log.txt"
+
+
+class ClipLog:
+    """Append-only rolling log capped at LOG_MAX lines."""
+
+    def __init__(self, path: Path):
+        self._path = path
+        self._count = path.stat().st_size and sum(1 for _ in path.open(encoding="utf-8")) if path.exists() else 0
+
+    def write(self, text: str, action: str, reason: str) -> None:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        # Replace newlines in clipboard text so each log entry stays on one line.
+        safe = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+        line = f"{ts} | {action:<9} | {reason:<15} | {safe}\n"
+        with self._path.open("a", encoding="utf-8") as f:
+            f.write(line)
+        self._count += 1
+        if self._count > LOG_MAX + LOG_TRIM:
+            self._trim()
+
+    def _trim(self) -> None:
+        lines = self._path.read_text(encoding="utf-8").splitlines(keepends=True)
+        lines = lines[-LOG_MAX:]
+        self._path.write_text("".join(lines), encoding="utf-8")
+        self._count = len(lines)
 
 
 class App:
@@ -19,6 +49,8 @@ class App:
         self._is_active = False
         self._listener = None
         self._pattern: re.Pattern | None = None
+        self._last_clip = ""
+        self._log: ClipLog | None = None
 
         root.title("Regex Click Blocker")
         root.resizable(False, False)
@@ -95,6 +127,8 @@ class App:
         if platform.system() == "Windows":
             self._hwnd = windows[0]._hWnd
 
+        self._log = ClipLog(LOG_PATH)
+        self._last_clip = ""
         self._is_active = True
         self._toggle_btn.config(text="Stop")
         self._status_var.set("Starting...")
@@ -108,6 +142,7 @@ class App:
             win32gui.EnableWindow(self._hwnd, True)
         self._hwnd = None
         self._pattern = None
+        self._log = None
         self._toggle_btn.config(text="Start")
         self._status_var.set("Stopped")
 
@@ -151,6 +186,10 @@ class App:
             action = "BLOCKED" if should_block else "unblocked"
             reason = "regex found" if matched else "regex not found"
             self._status_var.set(f"{action} — {reason}")
+
+            if text != self._last_clip and self._log is not None:
+                self._log.write(text, action, reason)
+                self._last_clip = text
 
         self.root.after(POLL_MS, self._tick)
 
