@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import messagebox
+from typing import Callable
 import pygetwindow as gw
 import pyautogui
 import platform
@@ -15,25 +16,8 @@ def find_windows(title_part: str) -> list[str]:
     return [w for w in gw.getAllTitles() if title_part in w and w]
 
 
-class ClickBlocker:
-    """No-op base; used on non-Windows platforms."""
-    def block(self, hwnd: int) -> None:
-        pass
-
-    def unblock(self, hwnd: int) -> None:
-        pass
-
-
-class Win32ClickBlocker(ClickBlocker):
-    def block(self, hwnd: int) -> None:
-        win32gui.EnableWindow(hwnd, False)
-
-    def unblock(self, hwnd: int) -> None:
-        win32gui.EnableWindow(hwnd, True)
-
-
 class ClipboardMonitor:
-    def __init__(self, root: tk.Tk, on_result):
+    def __init__(self, root: tk.Tk, on_result: Callable[[str], None]):
         self._root = root
         self._on_result = on_result
         self._pending = False
@@ -60,7 +44,6 @@ class App:
         self._is_blocking = False
         self._listener = None
 
-        self._blocker = Win32ClickBlocker() if platform.system() == "Windows" else ClickBlocker()
         self._monitor = ClipboardMonitor(root, self._show_clipboard)
 
         root.title("Cross-Platform UI")
@@ -96,8 +79,10 @@ class App:
             messagebox.showinfo("Error", "Window closed before it could be selected.")
             return
 
-        self._hwnd = windows[0]._hWnd if platform.system() == "Windows" else None
-        self._blocker.block(self._hwnd)
+        if platform.system() == "Windows":
+            self._hwnd = windows[0]._hWnd
+            win32gui.EnableWindow(self._hwnd, False)
+
         self._start_listener()
         self._is_blocking = True
         self._toggle_btn.config(text="Stop")
@@ -105,11 +90,13 @@ class App:
         messagebox.showinfo("Selected Window", f"You selected: {titles[0]}. Mouse clicks are now blocked.")
 
     def _stop(self):
-        self._stop_listener()
-        self._blocker.unblock(self._hwnd)
-        hwnd = self._hwnd
-        self._hwnd = None
+        # Set flag before stopping listener so any queued after(0,...) callbacks
+        # see _is_blocking=False and bail out without firing Ctrl+C.
         self._is_blocking = False
+        self._stop_listener()
+        if platform.system() == "Windows" and self._hwnd:
+            win32gui.EnableWindow(self._hwnd, True)
+        self._hwnd = None
         self._toggle_btn.config(text="Start")
         messagebox.showinfo("Selected Window", "Mouse clicks are now unblocked.")
 
@@ -135,10 +122,7 @@ class App:
         # SetForegroundWindow is intentionally absent: calling it on a
         # disabled window flickered the enabled/disabled state on alternate
         # clicks, letting every other click through.
-        if platform.system() == "Darwin":
-            pyautogui.hotkey("command", "c")
-        else:
-            pyautogui.hotkey("ctrl", "c")
+        pyautogui.hotkey("ctrl", "c")
         self._monitor.schedule_capture()
 
     def _show_clipboard(self, text: str):
