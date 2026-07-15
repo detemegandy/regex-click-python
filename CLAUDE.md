@@ -43,6 +43,17 @@ Double-click `run.bat` or run it from a terminal. It will:
 
 `uv` must be installed first: https://docs.astral.sh/uv/
 
+### Windows machine layout
+
+The Windows machine has two related repos under `C:\repos\`:
+
+| Folder | Contents |
+|---|---|
+| `C:\repos\regex-search` | — |
+| `C:\repos\regex-search-python` | — |
+
+Use `ssh windows "powershell -command '...'"` from the Mac to inspect or run commands in these folders.
+
 ### macOS (dev only — app will not function fully)
 
 tkinter is not a pip package on macOS; install it via Homebrew before `uv run`:
