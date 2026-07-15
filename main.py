@@ -8,10 +8,14 @@ import pyautogui
 import platform
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 from pynput import mouse
 
-if platform.system() == "Windows":
+IS_WINDOWS = platform.system() == "Windows"
+
+if IS_WINDOWS:
     import win32gui
+
 
 def format_regex_pattern(text: str) -> str:
     """Convert space-separated words / quoted phrases to a regex alternation.
@@ -45,12 +49,20 @@ def format_regex_pattern(text: str) -> str:
     return "|".join(parts)
 
 
-POLL_MS    = 50
-LOG_MAX    = 30_000
-LOG_HEADROOM = 1_000  # rewrite is triggered once count reaches LOG_MAX + LOG_HEADROOM
-LOG_PATH    = Path(__file__).parent / "clip_log.txt"
-CONFIG_PATH = Path(__file__).parent / "config.json"
-VIEWER_LIMIT = 500
+POLL_MS           = 50
+CLIP_TIMEOUT_TICKS = 20          # 1 second: ticks to wait for clipboard after a click
+LOG_MAX           = 30_000
+LOG_HEADROOM      = 1_000        # trim triggers at LOG_MAX + LOG_HEADROOM
+LOG_PATH          = Path(__file__).parent / "clip_log.txt"
+CONFIG_PATH       = Path(__file__).parent / "config.json"
+VIEWER_LIMIT      = 500
+
+
+class LogEntry(NamedTuple):
+    ts:     str
+    action: str
+    reason: str
+    clip:   str
 
 
 # ── ClipLog ───────────────────────────────────────────────────────────────────
@@ -89,7 +101,7 @@ class LogViewer(tk.Toplevel):
     def __init__(self, parent: tk.Tk, log_path: Path):
         super().__init__(parent)
         self._log_path = log_path
-        self._all_entries: list[tuple[str, str, str, str]] = []
+        self._all_entries: list[LogEntry] = []
         self._auto_var = tk.BooleanVar(value=True)
 
         self.title("Clipboard Log")
@@ -142,12 +154,12 @@ class LogViewer(tk.Toplevel):
         if not self._log_path.exists():
             self._bar_var.set("No log file yet.")
             return
-        entries = []
+        entries: list[LogEntry] = []
         for line in self._log_path.read_text(encoding="utf-8").splitlines():
             parts = line.split(" | ", 3)
             if len(parts) == 4:
-                entries.append(tuple(p.strip() for p in parts))
-        self._all_entries = entries  # type: ignore[assignment]
+                entries.append(LogEntry(*(p.strip() for p in parts)))
+        self._all_entries = entries
         self._apply_filter()
 
     def _apply_filter(self) -> None:
@@ -155,14 +167,14 @@ class LogViewer(tk.Toplevel):
         status_f = self._status_filter.get()
         entries  = self._all_entries
         if status_f != "All":
-            entries = [e for e in entries if e[1] == status_f]
+            entries = [e for e in entries if e.action == status_f]
         if text_f:
-            entries = [e for e in entries if text_f in e[3].lower() or text_f in e[0]]
+            entries = [e for e in entries if text_f in e.clip.lower() or text_f in e.ts]
         shown = entries[-VIEWER_LIMIT:]
         self._tree.delete(*self._tree.get_children())
-        for ts, action, reason, clip in shown:
-            tag = "blocked" if action == "BLOCKED" else "unblocked"
-            self._tree.insert("", "end", values=(ts, action, reason, clip), tags=(tag,))
+        for e in shown:
+            tag = "blocked" if e.action == "BLOCKED" else "unblocked"
+            self._tree.insert("", "end", values=(e.ts, e.action, e.reason, e.clip), tags=(tag,))
         total = len(self._all_entries); filtered = len(entries); n = len(shown)
         msg = f"{n} rows shown"
         if filtered < total:
@@ -216,6 +228,25 @@ class PatternRow:
         self.pattern_var.trace_add("write", lambda *_: on_change())
         self.enabled_var.trace_add("write", lambda *_: on_change())
 
+    def compile(self, advanced: bool) -> str | None:
+        """Compile the pattern in-place. Returns an error string, or None on success."""
+        self.mark_error(False)
+        self.compiled = None
+        if not self.enabled_var.get() or not self.pattern_var.get():
+            return None
+        try:
+            pat = self.pattern_var.get()
+            if not advanced:
+                pat = format_regex_pattern(pat)
+                self.compiled = re.compile(pat, re.IGNORECASE)
+            else:
+                self.compiled = re.compile(pat)
+            return None
+        except (re.error, ValueError) as exc:
+            self.mark_error(True)
+            label = self.desc_var.get() or self.pattern_var.get()
+            return f'"{label}": {exc}'
+
     def mark_error(self, error: bool) -> None:
         self._pat_entry.config(bg="#ffd6d6" if error else "white")
 
@@ -247,18 +278,24 @@ class App:
         self._viewer: LogViewer | None = None
         self._save_after: str | None = None
 
+        # click-gate state
+        self._click_pending      = False
+        self._click_was_enabled  = False  # whether window was enabled when click fired
+        self._pre_click_clip     = ""
+        self._pending_ticks      = 0
+
         root.title("Regex Click Blocker")
 
         # ── window selection ──────────────────────────────────────────────
-        r = tk.Frame(root, pady=4)
-        r.pack(fill=tk.X, padx=10)
-        tk.Label(r, text="Window:", width=8, anchor="w").pack(side=tk.LEFT)
+        window_row = tk.Frame(root, pady=4)
+        window_row.pack(fill=tk.X, padx=10)
+        tk.Label(window_row, text="Window:", width=8, anchor="w").pack(side=tk.LEFT)
         self._window_var = tk.StringVar()
         self._window_var.trace_add("write", lambda *_: self._schedule_save())
-        self._window_combo = ttk.Combobox(r, textvariable=self._window_var,
+        self._window_combo = ttk.Combobox(window_row, textvariable=self._window_var,
                                           state="readonly", width=36)
         self._window_combo.pack(side=tk.LEFT, padx=(0, 4))
-        tk.Button(r, text="↺", command=self._refresh_windows).pack(side=tk.LEFT)
+        tk.Button(window_row, text="↺", command=self._refresh_windows).pack(side=tk.LEFT)
 
         # ── pattern rows ──────────────────────────────────────────────────
         pf = tk.LabelFrame(root, text="Patterns", padx=6, pady=4)
@@ -291,11 +328,11 @@ class App:
         tk.Button(btn, text="Open Log", width=10, command=self._open_log).pack(side=tk.LEFT, padx=4)
 
         # ── clipboard display ─────────────────────────────────────────────
-        r3 = tk.Frame(root, pady=4)
-        r3.pack(fill=tk.X, padx=10)
-        tk.Label(r3, text="Clipboard:", width=8, anchor="w").pack(side=tk.LEFT)
+        clipboard_row = tk.Frame(root, pady=4)
+        clipboard_row.pack(fill=tk.X, padx=10)
+        tk.Label(clipboard_row, text="Clipboard:", width=8, anchor="w").pack(side=tk.LEFT)
         self._clipboard_var = tk.StringVar()
-        tk.Entry(r3, textvariable=self._clipboard_var,
+        tk.Entry(clipboard_row, textvariable=self._clipboard_var,
                  state="readonly", width=40).pack(side=tk.LEFT)
 
         self._status_var = tk.StringVar(value="—")
@@ -383,20 +420,9 @@ class App:
 
         errors: list[str] = []
         for row in self._rows:
-            row.mark_error(False)
-            row.compiled = None
-            if row.enabled_var.get() and row.pattern_var.get():
-                try:
-                    pat = row.pattern_var.get()
-                    if not self._advanced_var.get():
-                        pat = format_regex_pattern(pat)
-                        row.compiled = re.compile(pat, re.IGNORECASE)
-                    else:
-                        row.compiled = re.compile(pat)
-                except (re.error, ValueError) as exc:
-                    row.mark_error(True)
-                    label = row.desc_var.get() or row.pattern_var.get()
-                    errors.append(f'“{label}”: {exc}')
+            err = row.compile(self._advanced_var.get())
+            if err:
+                errors.append(err)
         if errors:
             messagebox.showinfo("Invalid regex", "\n".join(errors))
             return
@@ -409,21 +435,25 @@ class App:
             messagebox.showinfo("Error", "Window not found — refresh and try again.")
             return
 
-        if platform.system() == "Windows":
+        if IS_WINDOWS:
             self._hwnd = windows[0]._hWnd
+            win32gui.EnableWindow(self._hwnd, True)
 
-        self._log = ClipLog(LOG_PATH)
-        self._last_clip = ""
-        self._is_active = True
+        self._log              = ClipLog(LOG_PATH)
+        self._last_clip        = ""
+        self._click_pending    = False
+        self._pending_ticks    = 0
+        self._pre_click_clip   = ""
+        self._is_active        = True
         self._toggle_btn.config(text="Stop")
-        self._status_var.set("Starting...")
+        self._status_var.set("Monitoring — waiting for click")
         self._start_listener()
         self.root.after(POLL_MS, self._tick)
 
     def _stop(self) -> None:
         self._is_active = False
         self._stop_listener()
-        if platform.system() == "Windows" and self._hwnd:
+        if IS_WINDOWS and self._hwnd:
             win32gui.EnableWindow(self._hwnd, True)
         self._hwnd = None
         self._log  = None
@@ -436,9 +466,25 @@ class App:
         hwnd = self._hwnd
 
         def on_click(x, y, button, pressed):
-            if not pressed or not self._is_active:
+            if not pressed or button != mouse.Button.left or not self._is_active:
                 return
-            if platform.system() == "Windows" and hwnd and win32gui.IsWindowEnabled(hwnd):
+            if not IS_WINDOWS or not hwnd:
+                return
+            try:
+                lx, ty, rx, by = win32gui.GetWindowRect(hwnd)
+            except Exception:
+                return
+            if not (lx <= x <= rx and ty <= y <= by):
+                return  # click outside monitored window
+
+            enabled = win32gui.IsWindowEnabled(hwnd)
+            self._click_was_enabled = enabled
+            self._pre_click_clip    = self._last_clip
+            self._pending_ticks     = 0
+            self._click_pending     = True
+
+            if enabled:
+                # Send Ctrl+C while window still has focus; clipboard will update shortly
                 self.root.after(0, lambda: pyautogui.hotkey("ctrl", "c"))
 
         self._listener = mouse.Listener(on_click=on_click)
@@ -454,6 +500,23 @@ class App:
     def _matches_any(self, text: str) -> bool:
         return any(r.compiled and r.compiled.search(text) for r in self._rows)
 
+    def _apply_click_result(self, text: str) -> None:
+        """Evaluate clipboard text, update window enabled state and log. Called once per click."""
+        matched      = self._matches_any(text)
+        should_block = matched if not self._invert_var.get() else not matched
+
+        if IS_WINDOWS and self._hwnd:
+            win32gui.EnableWindow(self._hwnd, not should_block)
+
+        action = "BLOCKED" if should_block else "unblocked"
+        reason = "regex found" if matched else "regex not found"
+        self._status_var.set(f"{action} — {reason}")
+        self._clipboard_var.set(text)
+        self._last_clip = text
+
+        if self._log is not None:
+            self._log.write(text, action, reason)
+
     def _tick(self) -> None:
         if not self._is_active:
             return
@@ -465,20 +528,28 @@ class App:
 
         self._clipboard_var.set(text)
 
-        if self._hwnd is not None:
-            matched      = self._matches_any(text)
-            should_block = matched if not self._invert_var.get() else not matched
+        if self._hwnd is not None and self._click_pending:
+            if not self._click_was_enabled:
+                # Click landed on a disabled window: clipboard cannot have changed via Ctrl+C.
+                # Treat as "no change" — keep the window blocked.
+                self._click_pending = False
+                self._status_var.set("BLOCKED — window was disabled")
 
-            if platform.system() == "Windows":
-                win32gui.EnableWindow(self._hwnd, not should_block)
+            elif text != self._pre_click_clip:
+                # Clipboard changed: this is the result of the click's Ctrl+C.
+                self._click_pending = False
+                self._apply_click_result(text)
 
-            action = "BLOCKED" if should_block else "unblocked"
-            reason = "regex found" if matched else "regex not found"
-            self._status_var.set(f"{action} — {reason}")
-
-            if text != self._last_clip and self._log is not None:
-                self._log.write(text, action, reason)
-                self._last_clip = text
+            else:
+                # Clipboard unchanged so far — keep waiting up to the timeout.
+                self._pending_ticks += 1
+                if self._pending_ticks >= CLIP_TIMEOUT_TICKS:
+                    self._click_pending = False
+                    if IS_WINDOWS and self._hwnd:
+                        win32gui.EnableWindow(self._hwnd, False)
+                    self._status_var.set("BLOCKED — no clipboard change")
+                    if self._log is not None:
+                        self._log.write(self._last_clip, "BLOCKED", "no clipboard change")
 
         self.root.after(POLL_MS, self._tick)
 
