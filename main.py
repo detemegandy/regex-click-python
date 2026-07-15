@@ -13,6 +13,38 @@ from pynput import mouse
 if platform.system() == "Windows":
     import win32gui
 
+def format_regex_pattern(text: str) -> str:
+    """Convert space-separated words / quoted phrases to a regex alternation.
+
+    'apple "orange juice"' → 'apple|orange\\ juice'  (each part re.escaped)
+    Raises ValueError on unmatched quotes.
+    """
+    parts: list[str] = []
+    i = 0
+    while i < len(text):
+        if text[i] == '"':
+            end = text.find('"', i + 1)
+            if end == -1:
+                raise ValueError("Unmatched quotation mark")
+            phrase = text[i + 1:end].strip()
+            if phrase:
+                parts.append(re.escape(phrase))
+            i = end + 1
+        elif text[i] == ' ':
+            i += 1
+        else:
+            end = i
+            while end < len(text) and text[end] not in (' ', '"'):
+                end += 1
+            word = text[i:end]
+            if word:
+                parts.append(re.escape(word))
+            i = end
+    if not parts:
+        return ""
+    return "|".join(parts)
+
+
 POLL_MS    = 50
 LOG_MAX    = 30_000
 LOG_HEADROOM = 1_000  # rewrite is triggered once count reaches LOG_MAX + LOG_HEADROOM
@@ -235,7 +267,8 @@ class App:
         hdr.pack(fill=tk.X)
         tk.Label(hdr, text="On",          width=3).pack(side=tk.LEFT)
         tk.Label(hdr, text="Description", width=18, anchor="w").pack(side=tk.LEFT, padx=2)
-        tk.Label(hdr, text="Regex",       width=28, anchor="w").pack(side=tk.LEFT, padx=2)
+        self._pat_col_label = tk.Label(hdr, text="Words / Phrases", width=28, anchor="w")
+        self._pat_col_label.pack(side=tk.LEFT, padx=2)
         self._rows_frame = tk.Frame(pf)
         self._rows_frame.pack(fill=tk.X)
         tk.Button(pf, text="+ Add row", command=self._add_row).pack(anchor="e", pady=(4, 0))
@@ -243,8 +276,13 @@ class App:
         # ── options & buttons ─────────────────────────────────────────────
         self._invert_var = tk.BooleanVar()
         self._invert_var.trace_add("write", lambda *_: self._schedule_save())
-        tk.Checkbutton(root, text="Block when regex not found",
+        tk.Checkbutton(root, text="Block when pattern not found",
                        variable=self._invert_var).pack(anchor="w", padx=18)
+
+        self._advanced_var = tk.BooleanVar()
+        self._advanced_var.trace_add("write", lambda *_: self._on_advanced_change())
+        tk.Checkbutton(root, text="Advanced regex (raw)",
+                       variable=self._advanced_var).pack(anchor="w", padx=18)
 
         btn = tk.Frame(root)
         btn.pack(pady=8)
@@ -268,6 +306,12 @@ class App:
         self._load_config()
         if not self._rows:
             self._add_row()
+
+    def _on_advanced_change(self) -> None:
+        self._pat_col_label.config(
+            text="Regex" if self._advanced_var.get() else "Words / Phrases"
+        )
+        self._schedule_save()
 
     # ── pattern row management ────────────────────────────────────────────────
 
@@ -297,6 +341,7 @@ class App:
             return
         self._window_var.set(cfg.get("window", ""))
         self._invert_var.set(cfg.get("invert", False))
+        self._advanced_var.set(cfg.get("advanced", False))
         for d in cfg.get("patterns", []):
             self._add_row(d)
 
@@ -310,6 +355,7 @@ class App:
         cfg = {
             "window":   self._window_var.get(),
             "invert":   self._invert_var.get(),
+            "advanced": self._advanced_var.get(),
             "patterns": [r.to_dict() for r in self._rows],
         }
         CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
@@ -341,8 +387,11 @@ class App:
             row.compiled = None
             if row.enabled_var.get() and row.pattern_var.get():
                 try:
-                    row.compiled = re.compile(row.pattern_var.get())
-                except re.error as exc:
+                    pat = row.pattern_var.get()
+                    if not self._advanced_var.get():
+                        pat = format_regex_pattern(pat)
+                    row.compiled = re.compile(pat)
+                except (re.error, ValueError) as exc:
                     row.mark_error(True)
                     label = row.desc_var.get() or row.pattern_var.get()
                     errors.append(f""{label}": {exc}")
