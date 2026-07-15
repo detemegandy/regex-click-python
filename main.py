@@ -390,11 +390,13 @@ class App:
                     pat = row.pattern_var.get()
                     if not self._advanced_var.get():
                         pat = format_regex_pattern(pat)
-                    row.compiled = re.compile(pat)
+                        row.compiled = re.compile(pat, re.IGNORECASE)
+                    else:
+                        row.compiled = re.compile(pat)
                 except (re.error, ValueError) as exc:
                     row.mark_error(True)
                     label = row.desc_var.get() or row.pattern_var.get()
-                    errors.append(f""{label}": {exc}")
+                    errors.append(f'“{label}”: {exc}')
         if errors:
             messagebox.showinfo("Invalid regex", "\n".join(errors))
             return

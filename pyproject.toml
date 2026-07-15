@@ -13,3 +13,9 @@ dependencies = [
 
 [tool.uv]
 python-preference = "system"
+
+[tool.pytest.ini_options]
+testpaths = ["test_main.py"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
