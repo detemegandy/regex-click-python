@@ -45,14 +45,7 @@ Double-click `run.bat` or run it from a terminal. It will:
 
 ### Windows machine layout
 
-The Windows machine has two related repos under `C:\repos\`:
-
-| Folder | Contents |
-|---|---|
-| `C:\repos\regex-search` | — |
-| `C:\repos\regex-search-python` | — |
-
-Use `ssh windows "powershell -command '...'"` from the Mac to inspect or run commands in these folders.
+The Windows machine has a related repo at `C:\repos\regex-click` — the C# WinForms predecessor to this app. Use `ssh windows "powershell -command '...'"` from the Mac to inspect or run commands there.
 
 ### macOS (dev only — app will not function fully)
 

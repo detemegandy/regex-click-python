@@ -118,7 +118,7 @@ class LogViewer(tk.Toplevel):
         self._status_filter = tk.StringVar(value="All")
         self._status_filter.trace_add("write", lambda *_: self._apply_filter())
         ttk.Combobox(bar, textvariable=self._status_filter,
-                     values=["All", "BLOCKED", "unblocked"],
+                     values=["All", "BLOCKED", "unblocked", "SESSION"],
                      state="readonly", width=10).pack(side=tk.LEFT, padx=(4, 12))
         tk.Button(bar, text="Refresh", command=self._load).pack(side=tk.LEFT, padx=(0, 6))
         tk.Checkbutton(bar, text="Auto-refresh (2 s)", variable=self._auto_var).pack(side=tk.LEFT, padx=(0, 12))
@@ -142,6 +142,7 @@ class LogViewer(tk.Toplevel):
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self._tree.tag_configure("blocked",   background="#ffd6d6")
         self._tree.tag_configure("unblocked", background="#d6ffd6")
+        self._tree.tag_configure("session",   background="#d6e8ff")
 
         self._bar_var = tk.StringVar()
         tk.Label(self, textvariable=self._bar_var, anchor="w",
@@ -173,7 +174,7 @@ class LogViewer(tk.Toplevel):
         shown = entries[-VIEWER_LIMIT:]
         self._tree.delete(*self._tree.get_children())
         for e in shown:
-            tag = "blocked" if e.action == "BLOCKED" else "unblocked"
+            tag = "blocked" if e.action == "BLOCKED" else "session" if e.action == "SESSION" else "unblocked"
             self._tree.insert("", "end", values=(e.ts, e.action, e.reason, e.clip), tags=(tag,))
         total = len(self._all_entries); filtered = len(entries); n = len(shown)
         msg = f"{n} rows shown"
@@ -446,6 +447,15 @@ class App:
         self._is_active      = True
         self._toggle_btn.config(text="Stop")
 
+        # Log session start with active patterns so log entries can be backtested.
+        advanced = self._advanced_var.get()
+        mode_tag = "[raw]" if advanced else "[easy, case-insensitive]"
+        pattern_summary = "; ".join(
+            f"{r.desc_var.get() or r.pattern_var.get()} = {r.pattern_var.get()} {mode_tag}"
+            for r in self._rows if r.compiled
+        )
+        self._log.write(pattern_summary, "SESSION", "start")
+
         # Evaluate current clipboard before allowing any click through.
         # Window starts disabled; _apply_click_result will enable it if clipboard passes.
         if IS_WINDOWS and self._hwnd:
@@ -466,6 +476,8 @@ class App:
         self._stop_listener()
         if IS_WINDOWS and self._hwnd:
             win32gui.EnableWindow(self._hwnd, True)
+        if self._log is not None:
+            self._log.write("", "SESSION", "stop")
         self._hwnd = None
         self._log  = None
         self._toggle_btn.config(text="Start")
@@ -481,18 +493,21 @@ class App:
                 return
             if not IS_WINDOWS or not hwnd:
                 return
-            # Only react when the monitored window is the active foreground window.
-            # A disabled window cannot be foreground, so this also guards against
-            # clicks on the blocked window going through.
-            if win32gui.GetForegroundWindow() != hwnd:
+            # Use window rect for hit-testing: GetForegroundWindow() is unreliable
+            # at LL hook time because the focus switch hasn't completed yet.
+            try:
+                lx, ty, rx, by = win32gui.GetWindowRect(hwnd)
+            except Exception:
                 return
-            # Click landed on the enabled monitored window and went through.
-            # Request Ctrl+C from the main thread (cross-thread root.after is
-            # unreliable on Windows; a plain flag + _tick is simpler and safe).
+            if not (lx <= x <= rx and ty <= y <= by):
+                return
             self._pre_click_clip = self._last_clip
             self._pending_ticks  = 0
             self._click_pending  = True
-            self._should_ctrl_c  = True
+            # Only send Ctrl+C when the click went through (window was enabled).
+            # On a disabled window the click is blocked, so nothing was selected.
+            if win32gui.IsWindowEnabled(hwnd):
+                self._should_ctrl_c = True
 
         self._listener = mouse.Listener(on_click=on_click)
         self._listener.start()
