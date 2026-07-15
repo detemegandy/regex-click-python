@@ -279,10 +279,10 @@ class App:
         self._save_after: str | None = None
 
         # click-gate state
-        self._click_pending      = False
-        self._click_was_enabled  = False  # whether window was enabled when click fired
-        self._pre_click_clip     = ""
-        self._pending_ticks      = 0
+        self._click_pending    = False
+        self._pre_click_clip   = ""
+        self._pending_ticks    = 0
+        self._should_ctrl_c    = False   # set by pynput thread; consumed by _tick on main thread
 
         root.title("Regex Click Blocker")
 
@@ -437,16 +437,27 @@ class App:
 
         if IS_WINDOWS:
             self._hwnd = windows[0]._hWnd
-            win32gui.EnableWindow(self._hwnd, True)
 
-        self._log              = ClipLog(LOG_PATH)
-        self._last_clip        = ""
-        self._click_pending    = False
-        self._pending_ticks    = 0
-        self._pre_click_clip   = ""
-        self._is_active        = True
+        self._log            = ClipLog(LOG_PATH)
+        self._click_pending  = False
+        self._pending_ticks  = 0
+        self._pre_click_clip = ""
+        self._should_ctrl_c  = False
+        self._is_active      = True
         self._toggle_btn.config(text="Stop")
-        self._status_var.set("Monitoring — waiting for click")
+
+        # Evaluate current clipboard before allowing any click through.
+        # Window starts disabled; _apply_click_result will enable it if clipboard passes.
+        if IS_WINDOWS and self._hwnd:
+            win32gui.EnableWindow(self._hwnd, False)
+        try:
+            initial_clip = self.root.clipboard_get()
+        except tk.TclError:
+            initial_clip = ""
+        self._last_clip = initial_clip
+        self._clipboard_var.set(initial_clip)
+        self._apply_click_result(initial_clip)
+
         self._start_listener()
         self.root.after(POLL_MS, self._tick)
 
@@ -470,22 +481,18 @@ class App:
                 return
             if not IS_WINDOWS or not hwnd:
                 return
-            try:
-                lx, ty, rx, by = win32gui.GetWindowRect(hwnd)
-            except Exception:
+            # Only react when the monitored window is the active foreground window.
+            # A disabled window cannot be foreground, so this also guards against
+            # clicks on the blocked window going through.
+            if win32gui.GetForegroundWindow() != hwnd:
                 return
-            if not (lx <= x <= rx and ty <= y <= by):
-                return  # click outside monitored window
-
-            enabled = win32gui.IsWindowEnabled(hwnd)
-            self._click_was_enabled = enabled
-            self._pre_click_clip    = self._last_clip
-            self._pending_ticks     = 0
-            self._click_pending     = True
-
-            if enabled:
-                # Send Ctrl+C while window still has focus; clipboard will update shortly
-                self.root.after(0, lambda: pyautogui.hotkey("ctrl", "c"))
+            # Click landed on the enabled monitored window and went through.
+            # Request Ctrl+C from the main thread (cross-thread root.after is
+            # unreliable on Windows; a plain flag + _tick is simpler and safe).
+            self._pre_click_clip = self._last_clip
+            self._pending_ticks  = 0
+            self._click_pending  = True
+            self._should_ctrl_c  = True
 
         self._listener = mouse.Listener(on_click=on_click)
         self._listener.start()
@@ -521,6 +528,12 @@ class App:
         if not self._is_active:
             return
 
+        # Ctrl+C is sent here (main thread) rather than from the pynput callback
+        # thread, which avoids cross-thread tkinter issues on Windows.
+        if self._should_ctrl_c:
+            self._should_ctrl_c = False
+            pyautogui.hotkey("ctrl", "c")
+
         try:
             text = self.root.clipboard_get()
         except tk.TclError:
@@ -528,28 +541,27 @@ class App:
 
         self._clipboard_var.set(text)
 
-        if self._hwnd is not None and self._click_pending:
-            if not self._click_was_enabled:
-                # Click landed on a disabled window: clipboard cannot have changed via Ctrl+C.
-                # Treat as "no change" — keep the window blocked.
-                self._click_pending = False
-                self._status_var.set("BLOCKED — window was disabled")
-
-            elif text != self._pre_click_clip:
-                # Clipboard changed: this is the result of the click's Ctrl+C.
-                self._click_pending = False
-                self._apply_click_result(text)
-
-            else:
-                # Clipboard unchanged so far — keep waiting up to the timeout.
-                self._pending_ticks += 1
-                if self._pending_ticks >= CLIP_TIMEOUT_TICKS:
+        if self._hwnd is not None:
+            if self._click_pending:
+                if text != self._pre_click_clip:
+                    # Clipboard changed: result of the click's Ctrl+C is ready.
                     self._click_pending = False
-                    if IS_WINDOWS and self._hwnd:
-                        win32gui.EnableWindow(self._hwnd, False)
-                    self._status_var.set("BLOCKED — no clipboard change")
-                    if self._log is not None:
-                        self._log.write(self._last_clip, "BLOCKED", "no clipboard change")
+                    self._apply_click_result(text)
+                else:
+                    self._pending_ticks += 1
+                    if self._pending_ticks >= CLIP_TIMEOUT_TICKS:
+                        # Nothing was selected — treat as blocked.
+                        self._click_pending = False
+                        if IS_WINDOWS:
+                            win32gui.EnableWindow(self._hwnd, False)
+                        self._status_var.set("BLOCKED — no clipboard change")
+                        if self._log is not None:
+                            self._log.write(self._last_clip, "BLOCKED", "no clipboard change")
+
+            elif text != self._last_clip:
+                # Clipboard changed without a pending click (copied from another app).
+                # Re-evaluate so a disabled window can unblock without Stop/Start.
+                self._apply_click_result(text)
 
         self.root.after(POLL_MS, self._tick)
 
