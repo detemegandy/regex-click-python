@@ -80,7 +80,7 @@ def test_blocks_on_desirable(target_hwnd: int) -> bool:
     FakeStash starts on item 0 (plain). One click advances to item 1 (Pack Size).
     App should send Ctrl+C, evaluate, find it desirable, and disable FakeStash.
     """
-    print("  click → item 1 (Pack Size) …", end=" ", flush=True)
+    print("  click -> item 1 (Pack Size)...", end=" ", flush=True)
     click_center(target_hwnd)
     ok = wait_enabled(target_hwnd, enabled=False, timeout=2.0)
     print("PASS — FakeStash disabled" if ok else "FAIL — FakeStash still enabled")
@@ -89,7 +89,7 @@ def test_blocks_on_desirable(target_hwnd: int) -> bool:
 
 def test_stays_blocked(target_hwnd: int) -> bool:
     """While blocked, a click attempt should have no effect on the item index."""
-    print("  click while blocked → should stay blocked …", end=" ", flush=True)
+    print("  click while blocked -> should stay blocked...", end=" ", flush=True)
     click_center(target_hwnd)
     time.sleep(0.1)
     still_disabled = not win32gui.IsWindowEnabled(target_hwnd)
