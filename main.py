@@ -792,10 +792,11 @@ class App:
                 return
             if not (lx <= x <= rx and ty <= y <= by):
                 return
-            # Only act when the click went through (window was enabled),
-            # and only for the session that started this listener (hwnd guard
-            # prevents a stale listener from injecting into a new session).
-            if hwnd == self._hwnd and win32gui.IsWindowEnabled(hwnd):
+            # Always capture clicks inside the window bounds — PoE receives
+            # clicks even when win32gui.EnableWindow(False) is set (DirectX
+            # bypasses the Windows message pump).  The hwnd guard is still
+            # here to prevent a stale listener from injecting into a new session.
+            if hwnd == self._hwnd:
                 self._should_ctrl_c = True
 
         self._listener = mouse.Listener(on_click=on_click)
