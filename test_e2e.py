@@ -19,6 +19,7 @@ if sys.platform != "win32":
 
 import pyautogui
 import win32clipboard
+import win32con
 import win32gui
 
 pyautogui.FAILSAFE = False  # cursor may be at a corner in SSH sessions
