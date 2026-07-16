@@ -1,6 +1,6 @@
 import re
 import pytest
-from main import format_regex_pattern
+from main import format_regex_pattern, _tokenize_pattern
 
 
 # ── format_regex_pattern ──────────────────────────────────────────────────────
@@ -66,3 +66,36 @@ def test_easy_mode_alternation_matches_any():
     assert pat.search("I like orange")
     assert pat.search("fresh apple")
     assert not pat.search("banana")
+
+
+# ── _tokenize_pattern ─────────────────────────────────────────────────────────
+
+def test_tokenize_single():
+    assert _tokenize_pattern("apple") == ["apple"]
+
+def test_tokenize_two_words():
+    assert _tokenize_pattern("green blue") == ["green", "blue"]
+
+def test_tokenize_quoted_phrase():
+    assert _tokenize_pattern('"pack size"') == ['"pack size"']
+
+def test_tokenize_mixed():
+    assert _tokenize_pattern('"pack size" blue') == ['"pack size"', "blue"]
+
+def test_tokenize_empty():
+    assert _tokenize_pattern("") == []
+
+def test_tokenize_roundtrip_words():
+    # split then re-join should produce equivalent regex
+    text = "apple orange pear"
+    tokens = _tokenize_pattern(text)
+    assert len(tokens) == 3
+    joined = " ".join(tokens)
+    assert format_regex_pattern(joined) == format_regex_pattern(text)
+
+def test_tokenize_roundtrip_phrase():
+    text = '"pack size" reflect'
+    tokens = _tokenize_pattern(text)
+    assert len(tokens) == 2
+    joined = " ".join(tokens)
+    assert format_regex_pattern(joined) == format_regex_pattern(text)

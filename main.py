@@ -50,6 +50,28 @@ def format_regex_pattern(text: str) -> str:
     return "|".join(parts)
 
 
+def _tokenize_pattern(text: str) -> list[str]:
+    """Inverse of format_regex_pattern: split easy-mode input into individual terms."""
+    tokens: list[str] = []
+    s = text.strip()
+    while s:
+        if s.startswith('"'):
+            end = s.find('"', 1)
+            if end == -1:
+                tokens.append(s)
+                break
+            phrase = s[1:end]
+            if phrase:
+                tokens.append(f'"{phrase}"')
+            s = s[end + 1:].lstrip()
+        else:
+            word, _, rest = s.partition(" ")
+            if word:
+                tokens.append(word)
+            s = rest.lstrip()
+    return tokens
+
+
 POLL_MS      = 25
 LOG_MAX      = 30_000
 LOG_HEADROOM = 1_000
@@ -225,7 +247,7 @@ class LogViewer(tk.Toplevel):
 class PatternRow:
     """One pattern. polarity '+' lives inside a group; '-' is a standalone exclusion."""
 
-    def __init__(self, parent: tk.Frame, polarity: str, on_remove, on_change):
+    def __init__(self, parent: tk.Frame, polarity: str, on_remove, on_change, on_split=None):
         self._polarity  = polarity
         self._on_change = on_change
         self.active_var  = tk.BooleanVar(value=True)
@@ -251,6 +273,9 @@ class PatternRow:
         tk.Entry(self._frame, textvariable=self.desc_var,    width=18).pack(side=tk.LEFT, padx=2)
         self._pat_entry = tk.Entry(self._frame, textvariable=self.pattern_var, width=28)
         self._pat_entry.pack(side=tk.LEFT, padx=2)
+        if on_split is not None:
+            tk.Button(self._frame, text="split", fg="#666666", font=("", 8),
+                      command=lambda: on_split(self)).pack(side=tk.LEFT, padx=2)
         tk.Button(self._frame, text="×", width=2, command=lambda: on_remove(self)).pack(side=tk.LEFT, padx=2)
 
         self.desc_var.trace_add("write",    lambda *_: on_change())
@@ -327,6 +352,8 @@ class PatternGroup:
         tk.Entry(hdr, textvariable=self.desc_var, width=22).pack(side=tk.LEFT, padx=(4, 0))
         tk.Button(hdr, text="Remove group", fg="#888888",
                   command=lambda: on_remove(self)).pack(side=tk.RIGHT)
+        tk.Button(hdr, text="merge", fg="#666666", font=("", 8),
+                  command=self._merge_rows).pack(side=tk.RIGHT, padx=(0, 4))
 
         self._rows_frame = tk.Frame(self._frame)
         self._rows_frame.pack(fill=tk.X)
@@ -337,7 +364,8 @@ class PatternGroup:
         self.desc_var.trace_add("write", lambda *_: on_change())
 
     def add_row(self, data: dict | None = None) -> PatternRow:
-        row = PatternRow(self._rows_frame, "+", self._remove_row, self._on_change)
+        row = PatternRow(self._rows_frame, "+", self._remove_row, self._on_change,
+                         on_split=self._split_row)
         if data:
             row.load(data)
         self.rows.append(row)
@@ -349,6 +377,33 @@ class PatternGroup:
             return
         row.destroy()
         self.rows.remove(row)
+        self._on_change()
+
+    def _split_row(self, row: PatternRow) -> None:
+        tokens = _tokenize_pattern(row.pattern_var.get())
+        if len(tokens) <= 1:
+            return
+        desc = row.desc_var.get()
+        row.destroy()
+        self.rows.remove(row)
+        for i, token in enumerate(tokens):
+            new_row = self.add_row()
+            new_row.desc_var.set(desc if i == 0 else "")
+            new_row.pattern_var.set(token)
+
+    def _merge_rows(self) -> None:
+        if len(self.rows) <= 1:
+            return
+        combined = " ".join(r.pattern_var.get() for r in self.rows if r.pattern_var.get())
+        desc = next((r.desc_var.get() for r in self.rows if r.desc_var.get()), "")
+        for row in self.rows:
+            row.destroy()
+        self.rows.clear()
+        new_row = PatternRow(self._rows_frame, "+", self._remove_row, self._on_change,
+                             on_split=self._split_row)
+        new_row.desc_var.set(desc)
+        new_row.pattern_var.set(combined)
+        self.rows.append(new_row)
         self._on_change()
 
     def is_desirable(self, text: str) -> bool:
