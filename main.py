@@ -1,3 +1,4 @@
+import ctypes
 import json
 import sys
 import time
@@ -8,15 +9,29 @@ import subprocess
 import pygetwindow as gw
 import pyautogui
 import platform
+from ctypes import wintypes as _wt
 from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
-from pynput import mouse
 
 IS_WINDOWS = platform.system() == "Windows"
 
 if IS_WINDOWS:
     import win32gui
+
+    _WH_MOUSE_LL   = 14
+    _WM_LBUTTONDOWN = 0x0201
+
+    class _MSLLHOOKSTRUCT(ctypes.Structure):
+        _fields_ = [
+            ("pt",          _wt.POINT),
+            ("mouseData",   _wt.DWORD),
+            ("flags",       _wt.DWORD),
+            ("time",        _wt.DWORD),
+            ("dwExtraInfo", ctypes.c_size_t),
+        ]
+
+    _HOOKPROC_T = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, _wt.WPARAM, _wt.LPARAM)
 
 pyautogui.FAILSAFE = False  # prevent FailSafeException from killing the tick chain
 
@@ -440,7 +455,8 @@ class App:
         self.root        = root
         self._hwnd: int | None = None
         self._is_active  = False
-        self._listener   = None
+        self._hook_handle: int = 0
+        self._hook_proc  = None
         self._groups: list[PatternGroup] = []
         self._excl_rows: list[PatternRow] = []
         self._last_clip  = ""
@@ -787,40 +803,43 @@ class App:
     # ── mouse listener ────────────────────────────────────────────────────────
 
     def _start_listener(self) -> None:
+        if not IS_WINDOWS:
+            return
         hwnd = self._hwnd
 
-        def on_click(x, y, button, pressed):
-            if not pressed or button != mouse.Button.left or not self._is_active:
-                return
-            if not IS_WINDOWS or not hwnd or hwnd != self._hwnd:
-                return
+        # Direct WH_MOUSE_LL hook via ctypes.  The hook proc runs on the main
+        # (tkinter) thread — Windows delivers it through tkinter's message loop.
+        # Returning 1 discards the event before PoE's DirectX layer sees it.
+        @_HOOKPROC_T
+        def hook_proc(nCode, wParam, lParam):
             try:
-                lx, ty, rx, by = win32gui.GetWindowRect(hwnd)
+                if nCode >= 0 and wParam == _WM_LBUTTONDOWN and self._is_active and hwnd == self._hwnd:
+                    data = ctypes.cast(lParam, ctypes.POINTER(_MSLLHOOKSTRUCT)).contents
+                    x, y = data.pt.x, data.pt.y
+                    lx, ty, rx, by = win32gui.GetWindowRect(hwnd)
+                    if lx <= x <= rx and ty <= y <= by:
+                        if self._last_was_desirable:
+                            if self._log:
+                                self._log.write("", "SUPPRESSED", "click blocked at OS level")
+                            return 1  # suppress — PoE never sees this click
+                        else:
+                            if self._log:
+                                self._log.write("", "CLICK", "click received — queuing Ctrl+C")
+                            self._should_ctrl_c = True
             except Exception:
-                return
-            if not (lx <= x <= rx and ty <= y <= by):
-                return
-            # Click is inside the target window.
-            if self._last_was_desirable:
-                # WH_MOUSE_LL fires before DirectX, so suppress_event() prevents
-                # PoE from ever seeing this click — stops stash from cycling past
-                # the blocked item.
-                if self._log:
-                    self._log.write("", "SUPPRESSED", "click blocked at OS level")
-                self._listener.suppress_event()
-            else:
-                if self._log:
-                    self._log.write("", "CLICK", "click received — queuing Ctrl+C")
-                self._should_ctrl_c = True
+                pass
+            return ctypes.windll.user32.CallNextHookEx(0, nCode, wParam, lParam)
 
-        self._listener = mouse.Listener(on_click=on_click, suppress=False)
-        self._listener.start()
+        self._hook_proc   = hook_proc  # keep reference to prevent GC
+        self._hook_handle = ctypes.windll.user32.SetWindowsHookExW(
+            _WH_MOUSE_LL, hook_proc, None, 0
+        )
 
     def _stop_listener(self) -> None:
-        if self._listener:
-            self._listener.stop()
-            self._listener.join(timeout=1.0)  # wait for thread to exit before next _start()
-            self._listener = None
+        if self._hook_handle:
+            ctypes.windll.user32.UnhookWindowsHookEx(self._hook_handle)
+            self._hook_handle = 0
+        self._hook_proc = None
 
     # ── polling tick ──────────────────────────────────────────────────────────
 
