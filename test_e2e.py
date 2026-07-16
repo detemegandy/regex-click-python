@@ -20,6 +20,8 @@ if sys.platform != "win32":
 import pyautogui
 import win32gui
 
+pyautogui.FAILSAFE = False  # cursor may be at a corner in SSH sessions
+
 HERE = Path(__file__).parent
 
 # ── item texts must match fake_target.py's ITEMS list ────────────────────────
