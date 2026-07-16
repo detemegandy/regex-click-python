@@ -449,6 +449,7 @@ class App:
         self._save_after: str | None = None
         self._should_ctrl_c = False
         self._ctrl_c_at: float | None = None
+        self._last_was_desirable = False
 
         root.title("Regex Click Blocker")
 
@@ -761,8 +762,9 @@ class App:
 
     def _stop(self) -> None:
         self._is_active     = False
-        self._should_ctrl_c = False  # discard any pending Ctrl+C before Stop
-        self._ctrl_c_at     = None
+        self._should_ctrl_c      = False  # discard any pending Ctrl+C before Stop
+        self._ctrl_c_at          = None
+        self._last_was_desirable = False
         self._stop_listener()
         if IS_WINDOWS and self._hwnd:
             try:
@@ -834,11 +836,13 @@ class App:
                 self._ctrl_c_at = None  # clipboard changed; no need to time out
                 self._apply_result(text)
             elif self._ctrl_c_at is not None:
-                # Clipboard unchanged 200 ms after Ctrl+C → item didn't copy
-                # (same item, empty slot, timing miss). Re-enable so user can click.
+                # Clipboard unchanged 200 ms after Ctrl+C. Only re-enable if the
+                # last evaluated item was NOT desirable — if it WAS desirable we
+                # stay blocked; clicks keep firing Ctrl+C and will capture the
+                # new item once the stash cycles.
                 if time.monotonic() - self._ctrl_c_at > 0.200:
                     self._ctrl_c_at = None
-                    if IS_WINDOWS and self._hwnd:
+                    if not self._last_was_desirable and IS_WINDOWS and self._hwnd:
                         try:
                             win32gui.EnableWindow(self._hwnd, True)
                         except Exception:
@@ -850,7 +854,8 @@ class App:
     def _apply_result(self, text: str) -> None:
         desirable   = self._is_desirable(text)
         reason      = self._eval_reason(text)
-        self._last_clip = text
+        self._last_clip          = text
+        self._last_was_desirable = desirable
         if IS_WINDOWS and self._hwnd:
             win32gui.EnableWindow(self._hwnd, not desirable)
         action = "BLOCKED" if desirable else "allowed"
