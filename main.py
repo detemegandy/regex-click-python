@@ -1,5 +1,6 @@
 import json
 import sys
+import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 import re
@@ -447,6 +448,7 @@ class App:
         self._viewer: LogViewer | None = None
         self._save_after: str | None = None
         self._should_ctrl_c = False
+        self._ctrl_c_at: float | None = None
 
         root.title("Regex Click Blocker")
 
@@ -759,7 +761,8 @@ class App:
 
     def _stop(self) -> None:
         self._is_active     = False
-        self._should_ctrl_c = False  # discard any pending Ctrl+C from before Stop
+        self._should_ctrl_c = False  # discard any pending Ctrl+C before Stop
+        self._ctrl_c_at     = None
         self._stop_listener()
         if IS_WINDOWS and self._hwnd:
             try:
@@ -818,6 +821,7 @@ class App:
                 if IS_WINDOWS and self._hwnd:
                     try:
                         win32gui.EnableWindow(self._hwnd, False)
+                        self._ctrl_c_at = time.monotonic()
                     except Exception:
                         pass
             try:
@@ -826,7 +830,18 @@ class App:
                 text = ""
             self._clipboard_var.set(text)
             if self._hwnd and text != self._last_clip:
+                self._ctrl_c_at = None  # clipboard changed; no need to time out
                 self._apply_result(text)
+            elif self._ctrl_c_at is not None:
+                # Clipboard unchanged 200 ms after Ctrl+C → item didn't copy
+                # (same item, empty slot, timing miss). Re-enable so user can click.
+                if time.monotonic() - self._ctrl_c_at > 0.200:
+                    self._ctrl_c_at = None
+                    if IS_WINDOWS and self._hwnd:
+                        try:
+                            win32gui.EnableWindow(self._hwnd, True)
+                        except Exception:
+                            pass
         except Exception as exc:
             self._status_var.set(f"Error: {exc}")
         self.root.after(POLL_MS, self._tick)  # always reschedule
