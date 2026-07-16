@@ -452,6 +452,7 @@ class App:
         self._last_was_desirable = False
 
         root.title("Regex Click Blocker")
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # ── window selection ──────────────────────────────────────────────────
         wr = tk.Frame(root, pady=4)
@@ -778,6 +779,11 @@ class App:
         self._toggle_btn.config(text="Start")
         self._status_var.set("Stopped")
 
+    def _on_close(self) -> None:
+        if self._is_active:
+            self._stop()
+        self.root.destroy()
+
     # ── mouse listener ────────────────────────────────────────────────────────
 
     def _start_listener(self) -> None:
@@ -786,7 +792,7 @@ class App:
         def on_click(x, y, button, pressed):
             if not pressed or button != mouse.Button.left or not self._is_active:
                 return
-            if not IS_WINDOWS or not hwnd:
+            if not IS_WINDOWS or not hwnd or hwnd != self._hwnd:
                 return
             try:
                 lx, ty, rx, by = win32gui.GetWindowRect(hwnd)
@@ -794,14 +800,20 @@ class App:
                 return
             if not (lx <= x <= rx and ty <= y <= by):
                 return
-            # Always capture clicks inside the window bounds — PoE receives
-            # clicks even when win32gui.EnableWindow(False) is set (DirectX
-            # bypasses the Windows message pump).  The hwnd guard is still
-            # here to prevent a stale listener from injecting into a new session.
-            if hwnd == self._hwnd:
+            # Click is inside the target window.
+            if self._last_was_desirable:
+                # WH_MOUSE_LL fires before DirectX, so suppress_event() prevents
+                # PoE from ever seeing this click — stops stash from cycling past
+                # the blocked item.
+                if self._log:
+                    self._log.write("", "SUPPRESSED", "click blocked at OS level")
+                self._listener.suppress_event()
+            else:
+                if self._log:
+                    self._log.write("", "CLICK", "click received — queuing Ctrl+C")
                 self._should_ctrl_c = True
 
-        self._listener = mouse.Listener(on_click=on_click)
+        self._listener = mouse.Listener(on_click=on_click, suppress=False)
         self._listener.start()
 
     def _stop_listener(self) -> None:
@@ -818,6 +830,8 @@ class App:
         try:
             if self._should_ctrl_c:
                 self._should_ctrl_c = False
+                if self._log:
+                    self._log.write("", "CTRL+C", "sending hotkey; disabling window")
                 pyautogui.hotkey("ctrl", "c")
                 # Disable immediately after Ctrl+C — window was enabled so Ctrl+C
                 # reached PoE; now block spam clicks while we wait for evaluation.
@@ -838,15 +852,18 @@ class App:
             elif self._ctrl_c_at is not None:
                 # Clipboard unchanged 200 ms after Ctrl+C. Only re-enable if the
                 # last evaluated item was NOT desirable — if it WAS desirable we
-                # stay blocked; clicks keep firing Ctrl+C and will capture the
-                # new item once the stash cycles.
+                # stay blocked; pynput suppress_event() keeps PoE from cycling.
                 if time.monotonic() - self._ctrl_c_at > 0.200:
                     self._ctrl_c_at = None
                     if not self._last_was_desirable and IS_WINDOWS and self._hwnd:
                         try:
                             win32gui.EnableWindow(self._hwnd, True)
+                            if self._log:
+                                self._log.write("", "TIMEOUT", "clipboard unchanged 200ms — re-enabled")
                         except Exception:
                             pass
+                    elif self._last_was_desirable and self._log:
+                        self._log.write("", "TIMEOUT", "clipboard unchanged 200ms — staying blocked")
         except Exception as exc:
             self._status_var.set(f"Error: {exc}")
         self.root.after(POLL_MS, self._tick)  # always reschedule
