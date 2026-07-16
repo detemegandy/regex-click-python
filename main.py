@@ -17,6 +17,8 @@ IS_WINDOWS = platform.system() == "Windows"
 if IS_WINDOWS:
     import win32gui
 
+pyautogui.FAILSAFE = False  # prevent FailSafeException from killing the tick chain
+
 
 def format_regex_pattern(text: str) -> str:
     """Convert space-separated words / quoted phrases to a regex alternation.
@@ -756,10 +758,14 @@ class App:
         self.root.after(POLL_MS, self._tick)
 
     def _stop(self) -> None:
-        self._is_active = False
+        self._is_active     = False
+        self._should_ctrl_c = False  # discard any pending Ctrl+C from before Stop
         self._stop_listener()
         if IS_WINDOWS and self._hwnd:
-            win32gui.EnableWindow(self._hwnd, True)
+            try:
+                win32gui.EnableWindow(self._hwnd, True)
+            except Exception:
+                pass
         if self._log:
             self._log.write("", "SESSION", "stop")
         self._hwnd  = None
@@ -783,8 +789,10 @@ class App:
                 return
             if not (lx <= x <= rx and ty <= y <= by):
                 return
-            # Only act when the click went through (window was enabled).
-            if win32gui.IsWindowEnabled(hwnd):
+            # Only act when the click went through (window was enabled),
+            # and only for the session that started this listener (hwnd guard
+            # prevents a stale listener from injecting into a new session).
+            if hwnd == self._hwnd and win32gui.IsWindowEnabled(hwnd):
                 self._should_ctrl_c = True
 
         self._listener = mouse.Listener(on_click=on_click)
@@ -793,6 +801,7 @@ class App:
     def _stop_listener(self) -> None:
         if self._listener:
             self._listener.stop()
+            self._listener.join(timeout=1.0)  # wait for thread to exit before next _start()
             self._listener = None
 
     # ── polling tick ──────────────────────────────────────────────────────────
@@ -800,21 +809,27 @@ class App:
     def _tick(self) -> None:
         if not self._is_active:
             return
-        if self._should_ctrl_c:
-            self._should_ctrl_c = False
-            pyautogui.hotkey("ctrl", "c")
-            # Disable immediately after Ctrl+C — window was enabled so Ctrl+C
-            # reached PoE; now block spam clicks while we wait for evaluation.
-            if IS_WINDOWS and self._hwnd:
-                win32gui.EnableWindow(self._hwnd, False)
         try:
-            text = self.root.clipboard_get()
-        except tk.TclError:
-            text = ""
-        self._clipboard_var.set(text)
-        if self._hwnd and text != self._last_clip:
-            self._apply_result(text)
-        self.root.after(POLL_MS, self._tick)
+            if self._should_ctrl_c:
+                self._should_ctrl_c = False
+                pyautogui.hotkey("ctrl", "c")
+                # Disable immediately after Ctrl+C — window was enabled so Ctrl+C
+                # reached PoE; now block spam clicks while we wait for evaluation.
+                if IS_WINDOWS and self._hwnd:
+                    try:
+                        win32gui.EnableWindow(self._hwnd, False)
+                    except Exception:
+                        pass
+            try:
+                text = self.root.clipboard_get()
+            except tk.TclError:
+                text = ""
+            self._clipboard_var.set(text)
+            if self._hwnd and text != self._last_clip:
+                self._apply_result(text)
+        except Exception as exc:
+            self._status_var.set(f"Error: {exc}")
+        self.root.after(POLL_MS, self._tick)  # always reschedule
 
     def _apply_result(self, text: str) -> None:
         desirable   = self._is_desirable(text)
