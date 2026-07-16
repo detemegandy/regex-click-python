@@ -49,7 +49,7 @@ def format_regex_pattern(text: str) -> str:
     return "|".join(parts)
 
 
-POLL_MS      = 50
+POLL_MS      = 25
 LOG_MAX      = 30_000
 LOG_HEADROOM = 1_000
 LOG_PATH     = Path(__file__).parent / "clip_log.txt"
@@ -729,9 +729,6 @@ class App:
                 return
             # Only act when the click went through (window was enabled).
             if win32gui.IsWindowEnabled(hwnd):
-                # Disable immediately — before the next spam-click can arrive —
-                # so no click slips through while we wait for the clipboard.
-                win32gui.EnableWindow(hwnd, False)
                 self._should_ctrl_c = True
 
         self._listener = mouse.Listener(on_click=on_click)
@@ -750,6 +747,10 @@ class App:
         if self._should_ctrl_c:
             self._should_ctrl_c = False
             pyautogui.hotkey("ctrl", "c")
+            # Disable immediately after Ctrl+C — window was enabled so Ctrl+C
+            # reached PoE; now block spam clicks while we wait for evaluation.
+            if IS_WINDOWS and self._hwnd:
+                win32gui.EnableWindow(self._hwnd, False)
         try:
             text = self.root.clipboard_get()
         except tk.TclError:
