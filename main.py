@@ -727,8 +727,11 @@ class App:
                 return
             if not (lx <= x <= rx and ty <= y <= by):
                 return
-            # Only send Ctrl+C when the click went through (window was enabled).
+            # Only act when the click went through (window was enabled).
             if win32gui.IsWindowEnabled(hwnd):
+                # Disable immediately — before the next spam-click can arrive —
+                # so no click slips through while we wait for the clipboard.
+                win32gui.EnableWindow(hwnd, False)
                 self._should_ctrl_c = True
 
         self._listener = mouse.Listener(on_click=on_click)
