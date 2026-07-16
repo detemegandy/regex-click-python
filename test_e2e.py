@@ -18,6 +18,7 @@ if sys.platform != "win32":
     sys.exit(1)
 
 import pyautogui
+import win32clipboard
 import win32gui
 
 pyautogui.FAILSAFE = False  # cursor may be at a corner in SSH sessions
@@ -61,7 +62,21 @@ def center_of(hwnd: int) -> tuple[int, int]:
     return (lx + rx) // 2, (ty + by) // 2
 
 
+def get_clipboard() -> str:
+    try:
+        win32clipboard.OpenClipboard(0)
+        data = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+        win32clipboard.CloseClipboard()
+        return data
+    except Exception:
+        return ""
+
+
 def click_center(hwnd: int) -> None:
+    # Bring the window to the foreground first so pyautogui.click lands on it,
+    # not on whatever window is stacked on top at those coordinates.
+    win32gui.SetForegroundWindow(hwnd)
+    time.sleep(0.1)
     x, y = center_of(hwnd)
     pyautogui.click(x, y)
 
@@ -82,10 +97,21 @@ def test_blocks_on_desirable(target_hwnd: int) -> bool:
     FakeStash starts on item 0 (plain). One click advances to item 1 (Pack Size).
     App should send Ctrl+C, evaluate, find it desirable, and disable FakeStash.
     """
-    print("  click -> item 1 (Pack Size)...", end=" ", flush=True)
+    print("  click -> item 1 (Pack Size)...", flush=True)
+    lx, ty, rx, by = win32gui.GetWindowRect(target_hwnd)
+    print(f"    [diag] FakeStash rect: ({lx},{ty})-({rx},{by}), enabled={win32gui.IsWindowEnabled(target_hwnd)}", flush=True)
+    print(f"    [diag] foreground before click: {win32gui.GetForegroundWindow():#x} (target={target_hwnd:#x})", flush=True)
+
     click_center(target_hwnd)
+    time.sleep(0.15)
+
+    print(f"    [diag] foreground after click:  {win32gui.GetForegroundWindow():#x}", flush=True)
+    print(f"    [diag] clipboard after 150ms:   {get_clipboard()[:80]!r}", flush=True)
+    print(f"    [diag] FakeStash enabled:        {win32gui.IsWindowEnabled(target_hwnd)}", flush=True)
+
     ok = wait_enabled(target_hwnd, enabled=False, timeout=2.0)
-    print("PASS — FakeStash disabled" if ok else "FAIL — FakeStash still enabled")
+    print(f"    [diag] FakeStash enabled after 2s: {win32gui.IsWindowEnabled(target_hwnd)}", flush=True)
+    print("  " + ("PASS - FakeStash disabled" if ok else "FAIL - FakeStash still enabled"), flush=True)
     return ok
 
 
