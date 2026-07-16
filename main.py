@@ -839,8 +839,6 @@ class App:
 def main():
     root = tk.Tk()
     app = App(root)
-    if "--auto-start" in sys.argv:
-        root.after(200, app._on_toggle)
     root.mainloop()
 
 
