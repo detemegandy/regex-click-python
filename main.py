@@ -18,6 +18,7 @@ IS_WINDOWS = platform.system() == "Windows"
 
 if IS_WINDOWS:
     import win32gui
+    import win32clipboard
 
     _WH_MOUSE_LL   = 14
     _WM_LBUTTONDOWN = 0x0201
@@ -91,6 +92,7 @@ def _tokenize_pattern(text: str) -> list[str]:
 
 
 POLL_MS      = 25
+HOOK_COPY_MS = 30   # ms to wait after Ctrl+C for PoE to update the clipboard
 LOG_MAX      = 30_000
 LOG_HEADROOM = 1_000
 LOG_PATH     = Path(__file__).parent / "clip_log.txt"
@@ -463,8 +465,6 @@ class App:
         self._log: ClipLog | None = None
         self._viewer: LogViewer | None = None
         self._save_after: str | None = None
-        self._should_ctrl_c = False
-        self._ctrl_c_at: float | None = None
         self._last_was_desirable = False
 
         root.title("Regex Click Blocker")
@@ -724,9 +724,8 @@ class App:
                 self._hwnd = None
                 return
 
-        self._log           = ClipLog(LOG_PATH)
-        self._should_ctrl_c = False
-        self._is_active     = True
+        self._log       = ClipLog(LOG_PATH)
+        self._is_active = True
         self._toggle_btn.config(text="Stop")
 
         # Log session start with active pattern summary
@@ -748,16 +747,13 @@ class App:
         ]))
         self._log.write(summary, "SESSION", "start")
 
-        # Window always starts disabled; enable only if clipboard passes
-        if IS_WINDOWS and self._hwnd:
-            win32gui.EnableWindow(self._hwnd, False)
-
         self._last_clip = clip
         self._clipboard_var.set(clip)
 
         if clip:
             desirable = self._is_desirable(clip)
             reason    = self._eval_reason(clip)
+            self._last_was_desirable = desirable
             if desirable:
                 self._status_var.set(
                     "Blocked — item on clipboard already matches. "
@@ -765,22 +761,17 @@ class App:
                 )
                 self._log.write(clip, "BLOCKED", f"startup: {reason}")
             else:
-                if IS_WINDOWS and self._hwnd:
-                    win32gui.EnableWindow(self._hwnd, True)
                 self._status_var.set(f"Active — {reason}")
                 self._log.write(clip, "allowed", f"startup: {reason}")
         else:
-            if IS_WINDOWS and self._hwnd:
-                win32gui.EnableWindow(self._hwnd, True)
+            self._last_was_desirable = False
             self._status_var.set("Active — no clipboard content")
 
         self._start_listener()
         self.root.after(POLL_MS, self._tick)
 
     def _stop(self) -> None:
-        self._is_active     = False
-        self._should_ctrl_c      = False  # discard any pending Ctrl+C before Stop
-        self._ctrl_c_at          = None
+        self._is_active          = False
         self._last_was_desirable = False
         self._stop_listener()
         if IS_WINDOWS and self._hwnd:
@@ -809,7 +800,9 @@ class App:
 
         # Direct WH_MOUSE_LL hook via ctypes.  The hook proc runs on the main
         # (tkinter) thread — Windows delivers it through tkinter's message loop.
-        # Returning 1 discards the event before PoE's DirectX layer sees it.
+        # The click is HELD by Windows until we return, so we can copy the current
+        # item BEFORE the click reaches PoE.  If it is desirable, return 1 to
+        # discard — PoE never sees the click and the stash never cycles.
         @_HOOKPROC_T
         def hook_proc(nCode, wParam, lParam):
             try:
@@ -818,14 +811,18 @@ class App:
                     x, y = data.pt.x, data.pt.y
                     lx, ty, rx, by = win32gui.GetWindowRect(hwnd)
                     if lx <= x <= rx and ty <= y <= by:
+                        # Copy the currently visible item before the click changes the stash.
+                        pyautogui.hotkey("ctrl", "c")
+                        time.sleep(HOOK_COPY_MS / 1000)
+                        try:
+                            win32clipboard.OpenClipboard()
+                            text = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+                            win32clipboard.CloseClipboard()
+                        except Exception:
+                            text = ""
+                        self._apply_result(text)
                         if self._last_was_desirable:
-                            if self._log:
-                                self._log.write("", "SUPPRESSED", "click blocked at OS level")
-                            return 1  # suppress — PoE never sees this click
-                        else:
-                            if self._log:
-                                self._log.write("", "CLICK", "click received — queuing Ctrl+C")
-                            self._should_ctrl_c = True
+                            return 1  # suppress — stash never cycles
             except Exception:
                 pass
             return ctypes.windll.user32.CallNextHookEx(0, nCode, wParam, lParam)
@@ -847,44 +844,10 @@ class App:
         if not self._is_active:
             return
         try:
-            if self._should_ctrl_c:
-                self._should_ctrl_c = False
-                if self._log:
-                    self._log.write("", "CTRL+C", "sending hotkey; disabling window")
-                pyautogui.hotkey("ctrl", "c")
-                # Disable immediately after Ctrl+C — window was enabled so Ctrl+C
-                # reached PoE; now block spam clicks while we wait for evaluation.
-                if IS_WINDOWS and self._hwnd:
-                    try:
-                        win32gui.EnableWindow(self._hwnd, False)
-                        self._ctrl_c_at = time.monotonic()
-                    except Exception:
-                        pass
-            try:
-                text = self.root.clipboard_get()
-            except tk.TclError:
-                text = ""
-            self._clipboard_var.set(text)
-            if self._hwnd and text != self._last_clip:
-                self._ctrl_c_at = None  # clipboard changed; no need to time out
-                self._apply_result(text)
-            elif self._ctrl_c_at is not None:
-                # Clipboard unchanged 200 ms after Ctrl+C. Only re-enable if the
-                # last evaluated item was NOT desirable — if it WAS desirable we
-                # stay blocked; pynput suppress_event() keeps PoE from cycling.
-                if time.monotonic() - self._ctrl_c_at > 0.200:
-                    self._ctrl_c_at = None
-                    if not self._last_was_desirable and IS_WINDOWS and self._hwnd:
-                        try:
-                            win32gui.EnableWindow(self._hwnd, True)
-                            if self._log:
-                                self._log.write("", "TIMEOUT", "clipboard unchanged 200ms — re-enabled")
-                        except Exception:
-                            pass
-                    elif self._last_was_desirable and self._log:
-                        self._log.write("", "TIMEOUT", "clipboard unchanged 200ms — staying blocked")
-        except Exception as exc:
-            self._status_var.set(f"Error: {exc}")
+            text = self.root.clipboard_get()
+        except tk.TclError:
+            text = ""
+        self._clipboard_var.set(text)
         self.root.after(POLL_MS, self._tick)  # always reschedule
 
     def _apply_result(self, text: str) -> None:
@@ -892,9 +855,7 @@ class App:
         reason      = self._eval_reason(text)
         self._last_clip          = text
         self._last_was_desirable = desirable
-        if IS_WINDOWS and self._hwnd:
-            win32gui.EnableWindow(self._hwnd, not desirable)
-        action = "BLOCKED" if desirable else "allowed"
+        action = "SUPPRESSED" if desirable else "allowed"
         self._status_var.set(f"{'Blocked' if desirable else 'Allowed'} — {reason}")
         if self._log:
             self._log.write(text, action, reason)
