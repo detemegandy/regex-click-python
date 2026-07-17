@@ -33,7 +33,26 @@ if IS_WINDOWS:
             ("dwExtraInfo", ctypes.c_size_t),
         ]
 
-    _HOOKPROC_T = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, _wt.WPARAM, _wt.LPARAM)
+    # On 64-bit Windows WPARAM/LPARAM are 8-byte pointer-sized values; using
+    # c_size_t / c_ssize_t avoids the overflow ctypes gets when it tries to
+    # squeeze them into a 4-byte c_long / c_uint.
+    _HOOKPROC_T = ctypes.WINFUNCTYPE(
+        ctypes.c_long,
+        ctypes.c_int,      # nCode
+        ctypes.c_size_t,   # wParam  (WPARAM = UINT_PTR)
+        ctypes.c_ssize_t,  # lParam  (LPARAM = LONG_PTR)
+    )
+
+    # Pre-declare argtypes so CallNextHookEx never tries to fit a 64-bit
+    # lParam into a 32-bit c_long (which raises OverflowError on 64-bit OS).
+    _user32 = ctypes.windll.user32
+    _user32.CallNextHookEx.restype  = ctypes.c_long
+    _user32.CallNextHookEx.argtypes = [
+        ctypes.c_void_p,   # hhk
+        ctypes.c_int,      # nCode
+        ctypes.c_size_t,   # wParam
+        ctypes.c_ssize_t,  # lParam
+    ]
 
 pyautogui.FAILSAFE = False  # prevent FailSafeException from killing the tick chain
 
@@ -933,12 +952,15 @@ class App:
 
                         # Read clipboard before Ctrl+C so we know when PoE has
                         # updated it (detect change rather than relying on a fixed wait).
+                        old_text = ""
                         try:
                             win32clipboard.OpenClipboard()
-                            old_text = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
-                            win32clipboard.CloseClipboard()
+                            try:
+                                old_text = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+                            finally:
+                                win32clipboard.CloseClipboard()
                         except Exception:
-                            old_text = ""
+                            pass
 
                         # Ctrl+C — copy the currently visible item before the click changes the stash.
                         t_cc = time.perf_counter()
@@ -954,15 +976,18 @@ class App:
                         deadline = t_cb + HOOK_MAX_WAIT_MS / 1000
                         while time.perf_counter() < deadline:
                             time.sleep(HOOK_POLL_MS / 1000)
+                            new_text = old_text
                             try:
                                 win32clipboard.OpenClipboard()
-                                new_text = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
-                                win32clipboard.CloseClipboard()
-                                if new_text != old_text:
-                                    text = new_text
-                                    break
+                                try:
+                                    new_text = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+                                finally:
+                                    win32clipboard.CloseClipboard()
                             except Exception:
                                 pass  # clipboard busy — retry next poll
+                            if new_text != old_text:
+                                text = new_text
+                                break
                         clipboard_ms = (time.perf_counter() - t_cb) * 1000
 
                         t_ev = time.perf_counter()
