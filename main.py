@@ -1,3 +1,4 @@
+import collections
 import ctypes
 import json
 import sys
@@ -105,6 +106,17 @@ class LogEntry(NamedTuple):
     action: str
     reason: str
     clip:   str
+
+
+# groups: tuple of (label, ms, rows: tuple of (label, ms, hit))
+# excls:  tuple of (label, ms, hit)
+class ClickTiming(NamedTuple):
+    total_ms:     float
+    ctrl_c_ms:    float
+    clipboard_ms: float
+    eval_ms:      float
+    groups:       tuple
+    excls:        tuple
 
 
 # ── ClipLog ───────────────────────────────────────────────────────────────────
@@ -459,6 +471,7 @@ class App:
         self._is_active  = False
         self._hook_handle: int = 0
         self._hook_proc  = None
+        self._timing_history: collections.deque = collections.deque(maxlen=20)
         self._groups: list[PatternGroup] = []
         self._excl_rows: list[PatternRow] = []
         self._last_clip  = ""
@@ -537,6 +550,15 @@ class App:
         self._status_var = tk.StringVar(value="—")
         tk.Label(root, textvariable=self._status_var,
                  font=("", 9, "italic"), pady=4, wraplength=500, justify="left").pack()
+
+        # ── timing display ────────────────────────────────────────────────────
+        tf = tk.LabelFrame(root, text="Timing", padx=4, pady=2)
+        tf.pack(fill=tk.X, padx=10, pady=(0, 6))
+        self._timing_text = tk.Text(
+            tf, height=5, font=("Courier", 8),
+            state=tk.DISABLED, relief=tk.FLAT, bg=root.cget("bg"), wrap=tk.NONE,
+        )
+        self._timing_text.pack(fill=tk.X)
 
         self._refresh_windows()
         self._load_config()
@@ -676,6 +698,100 @@ class App:
                 parts.append(f"-{label} {'found' if hit else 'absent'}")
         return "; ".join(parts) if parts else "—"
 
+    def _timed_eval(self, text: str) -> tuple:
+        """Evaluate text with per-row timing. Returns (desirable, reason, groups, excls).
+
+        groups: tuple of (label, total_ms, rows: tuple of (label, ms, hit))
+        excls:  tuple of (label, ms, hit)
+        """
+        group_data = []
+        active_groups = []
+
+        for i, g in enumerate(self._groups, 1):
+            active_rows = [r for r in g.rows if r.active_var.get() and r.compiled]
+            if not active_rows:
+                continue
+            active_groups.append(g)
+            label = g.desc_var.get() or f"group{i}"
+            row_data = []
+            t_g = time.perf_counter()
+            for r in active_rows:
+                t_r = time.perf_counter()
+                hit = bool(r.compiled.search(text))
+                row_data.append((r.desc_var.get() or r.pattern_var.get()[:20], (time.perf_counter() - t_r) * 1000, hit))
+            group_ms = (time.perf_counter() - t_g) * 1000
+            group_data.append((label, group_ms, tuple(row_data)))
+
+        excl_data = []
+        for r in self._excl_rows:
+            if r.active_var.get() and r.compiled:
+                t_r = time.perf_counter()
+                hit = bool(r.compiled.search(text))
+                excl_data.append((r.desc_var.get() or r.pattern_var.get()[:20], (time.perf_counter() - t_r) * 1000, hit))
+
+        # desirable: all active groups match AND no exclusion hit
+        desirable = (
+            bool(active_groups or excl_data)
+            and all(any(hit for _, _, hit in gd[2]) for gd in group_data)
+            and not any(hit for _, _, hit in excl_data)
+        )
+
+        reason_parts = []
+        for i, (lbl, _, rows) in enumerate(group_data):
+            matched = sum(1 for _, _, hit in rows if hit)
+            reason_parts.append(f"+{lbl} {matched}/{len(rows)}")
+        for lbl, _, hit in excl_data:
+            reason_parts.append(f"-{lbl} {'found' if hit else 'absent'}")
+        reason = "; ".join(reason_parts) if reason_parts else "—"
+
+        return desirable, reason, tuple(group_data), tuple(excl_data)
+
+    def _update_timing_display(self) -> None:
+        h = self._timing_history
+        if not h:
+            return
+        n = len(h)
+
+        def avg(fn):
+            return sum(fn(t) for t in h) / n
+
+        total   = avg(lambda t: t.total_ms)
+        ctrl_c  = avg(lambda t: t.ctrl_c_ms)
+        cb      = avg(lambda t: t.clipboard_ms)
+        ev      = avg(lambda t: t.eval_ms)
+
+        lines = [
+            f"avg {total:.1f}ms ({n} clicks)  "
+            f"ctrl+c {ctrl_c:.1f}ms  clipboard {cb:.1f}ms  regex {ev:.2f}ms  "
+            f"[sleep {HOOK_COPY_MS}ms fixed]"
+        ]
+
+        # Use last click's structure to define rows; average over history entries
+        # that have the same label at the same position.
+        last = h[-1]
+        for gi, (glabel, _, rows) in enumerate(last.groups):
+            gms_vals = [t.groups[gi][1] for t in h if gi < len(t.groups) and t.groups[gi][0] == glabel]
+            gms = sum(gms_vals) / len(gms_vals) if gms_vals else 0
+            row_parts = []
+            for ri, (rlabel, _, _) in enumerate(rows):
+                rms_vals = [t.groups[gi][2][ri][1] for t in h
+                            if gi < len(t.groups) and ri < len(t.groups[gi][2])
+                            and t.groups[gi][2][ri][0] == rlabel]
+                rms = sum(rms_vals) / len(rms_vals) if rms_vals else 0
+                row_parts.append(f"{rlabel} {rms:.3f}ms")
+            lines.append(f"  + {glabel:<20} {gms:.3f}ms   {' | '.join(row_parts)}")
+        for ei, (elabel, _, _) in enumerate(last.excls):
+            ems_vals = [t.excls[ei][1] for t in h
+                        if ei < len(t.excls) and t.excls[ei][0] == elabel]
+            ems = sum(ems_vals) / len(ems_vals) if ems_vals else 0
+            lines.append(f"  - {elabel:<20} {ems:.3f}ms")
+
+        body = "\n".join(lines)
+        self._timing_text.config(state=tk.NORMAL)
+        self._timing_text.delete("1.0", tk.END)
+        self._timing_text.insert("1.0", body)
+        self._timing_text.config(state=tk.DISABLED)
+
     # ── start / stop ──────────────────────────────────────────────────────────
 
     def _on_toggle(self) -> None:
@@ -773,6 +889,7 @@ class App:
     def _stop(self) -> None:
         self._is_active          = False
         self._last_was_desirable = False
+        self._timing_history.clear()
         self._stop_listener()
         if IS_WINDOWS and self._hwnd:
             try:
@@ -811,17 +928,43 @@ class App:
                     x, y = data.pt.x, data.pt.y
                     lx, ty, rx, by = win32gui.GetWindowRect(hwnd)
                     if lx <= x <= rx and ty <= y <= by:
-                        # Copy the currently visible item before the click changes the stash.
+                        t0 = time.perf_counter()
+
+                        # Ctrl+C — copy the currently visible item before the click changes the stash.
+                        t_cc = time.perf_counter()
                         pyautogui.hotkey("ctrl", "c")
-                        time.sleep(HOOK_COPY_MS / 1000)
+                        ctrl_c_ms = (time.perf_counter() - t_cc) * 1000
+
+                        time.sleep(HOOK_COPY_MS / 1000)  # wait for PoE clipboard update
+
+                        t_cb = time.perf_counter()
                         try:
                             win32clipboard.OpenClipboard()
                             text = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
                             win32clipboard.CloseClipboard()
                         except Exception:
                             text = ""
-                        self._apply_result(text)
-                        if self._last_was_desirable:
+                        clipboard_ms = (time.perf_counter() - t_cb) * 1000
+
+                        t_ev = time.perf_counter()
+                        desirable, reason, groups, excls = self._timed_eval(text)
+                        eval_ms = (time.perf_counter() - t_ev) * 1000
+
+                        total_ms = (time.perf_counter() - t0) * 1000
+
+                        # Update state and UI
+                        self._last_clip          = text
+                        self._last_was_desirable = desirable
+                        action = "SUPPRESSED" if desirable else "allowed"
+                        self._status_var.set(f"{'Blocked' if desirable else 'Allowed'} — {reason}")
+                        if self._log:
+                            self._log.write(text, action, reason)
+
+                        timing = ClickTiming(total_ms, ctrl_c_ms, clipboard_ms, eval_ms, groups, excls)
+                        self._timing_history.append(timing)
+                        self.root.after(0, self._update_timing_display)
+
+                        if desirable:
                             return 1  # suppress — stash never cycles
             except Exception:
                 pass
