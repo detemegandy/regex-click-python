@@ -54,6 +54,14 @@ if IS_WINDOWS:
         ctypes.c_ssize_t,  # lParam
     ]
 
+    # Use kernel32.Sleep (not time.sleep) inside WINFUNCTYPE callbacks.
+    # time.sleep() calls Py_BEGIN_ALLOW_THREADS which releases the GIL through
+    # PyEval_SaveThread; Python 3.13+ added stricter thread-state assertions
+    # that crash when this is called under a PyGILState_Ensure-acquired GIL
+    # (which is what WINFUNCTYPE callbacks use).  kernel32.Sleep is a raw
+    # Win32 call — it never touches the GIL.
+    _kernel32 = ctypes.windll.kernel32
+
 pyautogui.FAILSAFE = False  # prevent FailSafeException from killing the tick chain
 
 
@@ -975,7 +983,7 @@ class App:
                         text = old_text
                         deadline = t_cb + HOOK_MAX_WAIT_MS / 1000
                         while time.perf_counter() < deadline:
-                            time.sleep(HOOK_POLL_MS / 1000)
+                            _kernel32.Sleep(HOOK_POLL_MS)
                             new_text = old_text
                             try:
                                 win32clipboard.OpenClipboard()
