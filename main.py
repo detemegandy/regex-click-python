@@ -92,8 +92,9 @@ def _tokenize_pattern(text: str) -> list[str]:
     return tokens
 
 
-POLL_MS      = 25
-HOOK_COPY_MS = 30   # ms to wait after Ctrl+C for PoE to update the clipboard
+POLL_MS          = 25
+HOOK_POLL_MS     = 5    # clipboard poll interval after Ctrl+C (ms)
+HOOK_MAX_WAIT_MS = 100  # give up polling after this many ms
 LOG_MAX      = 30_000
 LOG_HEADROOM = 1_000
 LOG_PATH     = Path(__file__).parent / "clip_log.txt"
@@ -763,7 +764,7 @@ class App:
         lines = [
             f"avg {total:.1f}ms ({n} clicks)  "
             f"ctrl+c {ctrl_c:.1f}ms  clipboard {cb:.1f}ms  regex {ev:.2f}ms  "
-            f"[sleep {HOOK_COPY_MS}ms fixed]"
+            f"[poll {HOOK_POLL_MS}ms / max {HOOK_MAX_WAIT_MS}ms]"
         ]
 
         # Use last click's structure to define rows; average over history entries
@@ -930,20 +931,38 @@ class App:
                     if lx <= x <= rx and ty <= y <= by:
                         t0 = time.perf_counter()
 
+                        # Read clipboard before Ctrl+C so we know when PoE has
+                        # updated it (detect change rather than relying on a fixed wait).
+                        try:
+                            win32clipboard.OpenClipboard()
+                            old_text = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+                            win32clipboard.CloseClipboard()
+                        except Exception:
+                            old_text = ""
+
                         # Ctrl+C — copy the currently visible item before the click changes the stash.
                         t_cc = time.perf_counter()
                         pyautogui.hotkey("ctrl", "c")
                         ctrl_c_ms = (time.perf_counter() - t_cc) * 1000
 
-                        time.sleep(HOOK_COPY_MS / 1000)  # wait for PoE clipboard update
-
+                        # Poll until clipboard changes or timeout.
+                        # If clipboard doesn't change, use old_text: covers the
+                        # case where we suppressed fire-res last click and are
+                        # still hovering over the same item.
                         t_cb = time.perf_counter()
-                        try:
-                            win32clipboard.OpenClipboard()
-                            text = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
-                            win32clipboard.CloseClipboard()
-                        except Exception:
-                            text = ""
+                        text = old_text
+                        deadline = t_cb + HOOK_MAX_WAIT_MS / 1000
+                        while time.perf_counter() < deadline:
+                            time.sleep(HOOK_POLL_MS / 1000)
+                            try:
+                                win32clipboard.OpenClipboard()
+                                new_text = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+                                win32clipboard.CloseClipboard()
+                                if new_text != old_text:
+                                    text = new_text
+                                    break
+                            except Exception:
+                                pass  # clipboard busy — retry next poll
                         clipboard_ms = (time.perf_counter() - t_cb) * 1000
 
                         t_ev = time.perf_counter()
